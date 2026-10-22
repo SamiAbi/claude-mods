@@ -1,0 +1,14 @@
+{
+  "name": "claude-mods",
+  "owner": {
+    "name": "Sami Abishai"
+  },
+  "description": "Claude Code mods by Sami Abishai.",
+  "plugins": [
+    {
+      "name": "focus-list",
+      "source": "./focus-list",
+      "description": "While Claude works, hide its text and show a live, animated plan; when it finishes, show only the summary."
+    }
+  ]
+}
