@@ -1,7 +1,7 @@
 {
   "name": "focus-list",
-  "version": "0.1.0",
-  "description": "While Claude works, hide its text and show a live to-do list; when it finishes, show only the summary.",
+  "version": "0.2.0",
+  "description": "While Claude works, hide its text and show a live plan and the skills it uses; when it finishes, show only the summary.",
   "types": "./types/index.d.ts",
   "author": {
     "name": "Sami Abishai"

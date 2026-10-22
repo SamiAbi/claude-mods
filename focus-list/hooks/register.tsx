@@ -19,6 +19,8 @@ const turnSince = atom({ plugin: 'focus-list', key: 'turnSince' } as const, 0)
 const stepSince = atom({ plugin: 'focus-list', key: 'stepSince' } as const, 0)
 const doneAt = atom({ plugin: 'focus-list', key: 'doneAt' } as const, {})
 const finish = atom({ plugin: 'focus-list', key: 'finish' } as const, null)
+const skills = atom({ plugin: 'focus-list', key: 'skills' } as const, [])
+const pendingSkills = atom({ plugin: 'focus-list', key: 'pendingSkills' } as const, [])
 const turnTexts = atom({ plugin: 'focus-list', key: 'turnTexts' } as const, [])
 const turnTools = atom({ plugin: 'focus-list', key: 'turnTools' } as const, [])
 const summaries = atom({ plugin: 'focus-list', key: 'summaries' } as const, [])
@@ -29,6 +31,24 @@ const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', 
 const PULSE = ['╸', '━', '╸', ' ']
 const BAR = 18
 const DOTS = ['', '.', '..', '...']
+const TWINKLE = ['✦', '✦', '✧', '✧']
+
+// Add a skill once, keeping the order skills were first used in.
+const withSkill = (list: string[], name: string) => (list.includes(name) ? list : [...list, name])
+
+// The skills line: the names that fit the width, the rest counted.
+const fitSkills = (names: string[], room: number) => {
+  const shown: string[] = []
+  let used = 0
+  for (const name of names) {
+    const cost = name.length + (shown.length > 0 ? 3 : 0)
+    if (shown.length > 0 && used + cost > room - 10) break
+    shown.push(name)
+    used += cost
+  }
+
+  return { shown, more: names.length - shown.length }
+}
 
 // A bar with no end known: a bright run that sweeps across and back.
 const sweep = (frame: number) => {
@@ -208,6 +228,16 @@ export const register: Register = on => {
     return { result: `Plan shown: ${done} of ${plan.length} done.` }
   }).catch(() => ({ result: 'The plan could not be shown; carry on.' }))
 
+  // A skill the person typed as /name expands before its turn starts: hold it for that turn.
+  // Skills Claude loads itself are caught at the Skill tool call, on the main loop alone.
+  on('skill.prompt', async ($, e, next) => {
+    if ((await read($, isOn)) && !(await read($, isWorking))) {
+      await update($, pendingSkills, list => withSkill(list, e.skill))
+    }
+
+    return next(e)
+  })
+
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined && (await read($, isOn))) {
       const at = await $.clock.now()
@@ -215,6 +245,9 @@ export const register: Register = on => {
       await update($, activity, () => [])
       await update($, doneAt, () => ({}))
       await update($, finish, () => null)
+      const typed = await read($, pendingSkills)
+      await update($, skills, () => typed)
+      await update($, pendingSkills, () => [])
       await update($, turnTexts, () => [])
       await update($, turnTools, () => [])
       await update($, turnSince, () => at)
@@ -279,7 +312,12 @@ export const register: Register = on => {
                   },
             ),
       )
-    } else if (!['TaskCreate', 'TaskList', 'TaskGet', PLAN_TOOL].includes(e.tool)) {
+    }
+    if (e.tool === 'Skill' && typeof input.skill === 'string') {
+      const name = input.skill
+      await update($, skills, list => withSkill(list, name))
+    }
+    if (!['TodoWrite', 'TaskUpdate', 'TaskCreate', 'TaskList', 'TaskGet', PLAN_TOOL].includes(e.tool)) {
       const doing: Activity = { title: describe(e.tool, input), at: await $.clock.now() }
       await update($, activity, list => [...list, doing].slice(-50))
     }
@@ -386,10 +424,34 @@ export const register: Register = on => {
     const at = await read($, clock)
     const list = await read($, steps)
     const recent = await read($, activity)
+    const used = await read($, skills)
+    const skillRows = used.length > 0 ? 2 : 0
+
+    // While working the newest skill twinkles; once done the line is still.
+    const skillLine = (label: string, isLive: boolean) => {
+      if (used.length === 0) return []
+      const { shown, more } = fitSkills(used, Math.max(20, e.props.bodyColumns - label.length - 6))
+      const newest = used[used.length - 1]
+      const mark = isLive ? TWINKLE[Math.floor(at / TICK / 2) % TWINKLE.length] : '✦'
+
+      return [
+        <Text> </Text>,
+        <Text>
+          {'  '}
+          <Text color="claude">{mark}</Text> <Text bold={isLive} dimColor={!isLive}>{label}</Text>
+          {'  '}
+          {shown.flatMap((name, index) => [
+            ...(index > 0 ? [<Text dimColor> · </Text>] : []),
+            isLive && name === newest ? <Text color="claude">{name}</Text> : <Text dimColor>{name}</Text>,
+          ])}
+          {more > 0 ? <Text dimColor> +{more} more</Text> : ''}
+        </Text>,
+      ]
+    }
 
     if (ended !== null) {
       const width = Math.max(20, e.props.bodyColumns - 6)
-      const room = Math.max(2, e.props.maxRows - 1)
+      const room = Math.max(2, e.props.maxRows - 1 - skillRows)
       const rows: Step[] =
         list.length > 0
           ? list
@@ -423,6 +485,7 @@ export const register: Register = on => {
               <Text dimColor>  ○ {short(step.title, width)}</Text>
             ),
           )}
+          {skillLine('Used', false)}
         </Box>
       )
     }
@@ -432,7 +495,7 @@ export const register: Register = on => {
     const frame = Math.floor(at / TICK)
     const spin = SPINNER[frame % SPINNER.length]
     const width = Math.max(20, e.props.bodyColumns - 8)
-    const room = Math.max(3, e.props.maxRows - 1)
+    const room = Math.max(3, e.props.maxRows - 1 - skillRows)
     const now = recent[recent.length - 1]
     const nowLine = now ? (
       <Text dimColor>
@@ -473,6 +536,7 @@ export const register: Register = on => {
               <Text color="claude">{spin}</Text> Making a plan{DOTS[Math.floor(frame / 3) % DOTS.length]}
             </Text>
           )}
+          {skillLine('Skills', true)}
         </Box>
       )
     }
@@ -539,6 +603,7 @@ export const register: Register = on => {
           }
           return [<Text dimColor>  ○ {short(step.title, width)}</Text>]
         })}
+        {skillLine('Skills', true)}
       </Box>
     )
   })

@@ -116,3 +116,56 @@ test('while working: a live plan with now and next, no text; after: the summary 
   expect(await fresh.find({ type: 'Text', text: /Done/ })).toBeUndefined()
   expect(await fresh.find({ type: 'Text', text: /Run the tests/ })).toBeUndefined()
 })
+
+test('skills: a strip while working, the newest lit, each once; a still line when done; cleared by the next prompt', async ($, on) => {
+  let at = 1_000
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  on('clock.now', () => ({ value: at }))
+  on('clock.every', () => ({ value: undefined }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'focus-list' } }))
+  on('tool.register', () => ({ value: { tool: PLAN } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('skill.prompt', (_, e) => ({ text: e.text }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const texts = async (requestId: string) => {
+    const ui = await $.ui.mount({ ...BAND, requestId })
+    const all = (await ui.findAll({ type: 'Text' })).map(t => t.text)
+    await ui.unmount()
+    return all
+  }
+
+  // A skill typed as /name before the turn counts for that turn.
+  await $.skill.prompt({ skill: 'simplify', text: 'Simplify the code.' })
+  await $.turn.start({ text: '/simplify', turnId: 't1' })
+  expect((await texts('b1')).some(t => t.includes('Skills'))).toBe(true)
+
+  // Skills Claude loads itself join in order; a repeat appears once; the newest is the lit one.
+  await $.tool.call({ tool: 'Skill', skill: 'code-review' } as never)
+  await $.tool.call({ tool: 'Skill', skill: 'simplify' } as never)
+  at += 500
+  const working = await texts('b2')
+  const line = working.find(t => t.includes('Skills')) ?? ''
+  expect(line).toContain('simplify · code-review')
+  expect(line.indexOf('simplify')).toBe(line.lastIndexOf('simplify'))
+
+  // A subagent's skill is not this task's.
+  await $.tool.call({ tool: 'Skill', skill: 'pdf', agentId: 'helper' } as never)
+  expect((await texts('b3')).some(t => t.includes('pdf'))).toBe(false)
+
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+  const after = await texts('b4')
+  expect(after.some(t => t.includes('Used') && t.includes('simplify · code-review'))).toBe(true)
+
+  await $.turn.start({ text: 'next', turnId: 't2' })
+  expect((await texts('b5')).some(t => t.includes('simplify'))).toBe(false)
+})

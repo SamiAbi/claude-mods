@@ -15,6 +15,8 @@ declare module 'claude-code' {
       stepSince: number
       doneAt: Record<string, number>
       finish: Finish | null
+      skills: string[]
+      pendingSkills: string[]
       turnTexts: string[]
       turnTools: string[]
       summaries: string[]

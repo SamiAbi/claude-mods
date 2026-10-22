@@ -14,12 +14,15 @@ While Claude works, its text and tool calls are hidden. Above the prompt you see
   ⠹ Write the fix · 23s
     └ Build the app
   → Next: Run the tests
+
+  ✦ Skills  simplify · code-review
 ```
 
 - A spinner, a progress bar that fills as steps finish, and a timer for the whole task and for the current step.
 - The line under the current step says exactly what Claude is doing right now.
 - The next step is marked **→ Next:**.
-- When Claude finishes, only its summary stays in the conversation, and the finished list stays above the prompt until your next prompt.
+- Once Claude uses a skill, a skills line appears at the bottom: every skill used in the task, each once, the newest lit and twinkling. Skills you start with `/name` count too; skills used by Claude's helpers (subagents) do not.
+- When Claude finishes, only its summary stays in the conversation, and the finished list stays above the prompt until your next prompt, ending with `✦ Used` and the skills it used.
 
 Claude gets a small plan tool of its own (it never asks for permission) and an instruction to send its plan first and end with a full summary.
 
