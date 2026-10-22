@@ -1,6 +1,6 @@
 {
   "name": "bottom-line",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "While Claude works, hide its text and show a live plan with the skills and images it uses; when it finishes, show only the summary. Keeps a history of past tasks.",
   "types": "./types/index.d.ts",
   "author": {
@@ -25,6 +25,12 @@
       "type": "boolean",
       "title": "Images row",
       "description": "Show thumbnails of the pictures in play in the list.",
+      "default": true
+    },
+    "helpers": {
+      "type": "boolean",
+      "title": "Helpers",
+      "description": "Show the helpers (subagents) and background commands under the step that started them.",
       "default": true
     },
     "keepFinished": {

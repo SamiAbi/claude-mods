@@ -34,15 +34,28 @@ Claude gets a small plan tool of its own (it never asks for permission) and an i
 
 **Click a step to see its actions.** Each step with actions has a `▸`. Click it and the actions open under the step, each with `✓` or `✗` and how long it took. Click again to close. Clicks work in Claude Code's fullscreen mode. A clicked row is never left highlighted.
 
+**Helpers.** When Claude starts a helper (a subagent, such as a review or a code search) or leaves a shell command running in the background (a dev server, a long build), it stands under the step that started it:
+
+```
+  ⠹ Review for bugs · 22s
+    ⚇ ⠹ code-review · Review the diff · 12s
+        └ Running git diff
+    ⚇ ✓ Explore · Find the callers · 4s
+    ▶ ⠹ Start the dev server · 3m
+```
+
+`⚇` is a helper, `▶` a background command; a running one says what it is doing now. Click one to see all its actions. Helpers a helper starts stand one level in. Once a step is done its finished helpers fold into a count (`✓ Review for bugs · 2 helpers`; click the step to see them), and anything still running stays visible, after the task too (`still running · 3m`), until it ends. The history keeps each task's helpers under their steps.
+
 **History.** `/bottom-line history` opens a panel beside the chat with your past tasks, newest first, one line each: when, how long, the task, and how many steps. Click a task to open it: its steps (with failed tries), the skills and pictures it used, and the first line of its summary. The last 50 tasks are kept.
 
-**Settings.** In Claude Code's plugin settings, bottom-line has four switches, all on by default:
+**Settings.** In Claude Code's plugin settings, bottom-line has five switches, all on by default:
 
 | Switch | Off means |
 | --- | --- |
 | Hide Claude's text while it works | Claude's messages and tool steps show as usual; the list still shows |
 | Skills line | no `✦ Skills` line |
 | Images row | no `▣ Images` row, and no thumbnails are made |
+| Helpers | no helper or background-command rows |
 | Keep the finished list | the list goes away as soon as Claude finishes |
 
 - `/bottom-line` turns the whole mod on or off. Your choice is remembered.

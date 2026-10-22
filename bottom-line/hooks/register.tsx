@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
-import type { Activity, HistoryEntry, Step, StepStatus, Thumb } from '../types'
+import type { Activity, Helper, HelperStatus, HistoryEntry, HistoryHelper, Step, StepStatus, Thumb } from '../types'
 
 const NAME = 'bottom-line'
 const PLAN_TOOL = 'mcp__bottom-line__plan'
@@ -23,6 +23,9 @@ const turnTitle = atom({ plugin: 'bottom-line', key: 'turnTitle' } as const, '')
 const doneAt = atom({ plugin: 'bottom-line', key: 'doneAt' } as const, {})
 const finish = atom({ plugin: 'bottom-line', key: 'finish' } as const, null)
 const openStep = atom({ plugin: 'bottom-line', key: 'openStep' } as const, null)
+const openHelper = atom({ plugin: 'bottom-line', key: 'openHelper' } as const, null)
+const turnNow = atom({ plugin: 'bottom-line', key: 'turnNow' } as const, '')
+const helpers = atom({ plugin: 'bottom-line', key: 'helpers' } as const, [])
 const openHistory = atom({ plugin: 'bottom-line', key: 'openHistory' } as const, null)
 const skills = atom({ plugin: 'bottom-line', key: 'skills' } as const, [])
 const pendingSkills = atom({ plugin: 'bottom-line', key: 'pendingSkills' } as const, [])
@@ -267,8 +270,12 @@ async function keepInHistory($: EngineInterface, id: string, isAborted: boolean,
   const at = await read($, turnSince)
   const ended = await $.clock.now()
   const list = await read($, steps)
-  const recent = await read($, activity)
+  const recent = (await read($, activity)).filter(action => action.helper === undefined)
   const failuresOf = (title: string) => recent.filter(action => action.step === title && action.failed).length
+  const turn = await read($, turnNow)
+  const team = (await read($, helpers)).filter(helper => helper.turn === turn)
+  const lastTitle = list[list.length - 1]?.title
+  const helpersOf = (title: string) => historyHelpers(team, title, title === lastTitle)
   const firstStep = list[0]?.title ?? recent[0]?.title ?? 'Task'
   const asked = (await read($, turnTitle)) || firstStep
   const entry: HistoryEntry = {
@@ -279,7 +286,12 @@ async function keepInHistory($: EngineInterface, id: string, isAborted: boolean,
     isAborted,
     steps:
       list.length > 0
-        ? list.map(step => ({ title: step.title, status: step.status, failures: failuresOf(step.title) }))
+        ? list.map(step => ({
+            title: step.title,
+            status: step.status,
+            failures: failuresOf(step.title),
+            ...(helpersOf(step.title).length > 0 ? { helpers: helpersOf(step.title) } : {}),
+          }))
         : recent.slice(-30).map(action => ({
             title: action.title,
             status: 'completed' as const,
@@ -293,6 +305,90 @@ async function keepInHistory($: EngineInterface, id: string, isAborted: boolean,
   const kept = Array.isArray(before) ? (before as HistoryEntry[]) : []
   await $.store.set('history', [entry, ...kept.filter(old => old.id !== id)].slice(0, HISTORY_KEEP))
 }
+
+// A step's helpers as the history keeps them; the last step also takes those started
+// before any plan (they belong to no step).
+const historyHelpers = (team: Helper[], title: string, takesLoose: boolean): HistoryHelper[] =>
+  team
+    .filter(helper => !helper.parent && (helper.step === title || (takesLoose && helper.step === undefined)))
+    .map(helper => ({
+      name: helper.name,
+      job: helper.job,
+      kind: helper.kind,
+      seconds: Math.max(0, Math.round(((helper.endAt ?? helper.at) - helper.at) / 1000)),
+      status: helper.status,
+    }))
+
+// How a helper ended, from its loop's reason or its notice's status word.
+const helperEnd = (word: string): HelperStatus =>
+  word === 'answer' || word === 'completed' ? 'done' : word === 'aborted' || word === 'killed' ? 'stopped' : 'failed'
+
+// A new helper: of the task shown, under the step Claude is on, or under the helper that
+// started it.
+async function addHelper($: EngineInterface, fresh: Pick<Helper, 'id' | 'kind' | 'name' | 'job'> & { parent?: string }) {
+  const team = await read($, helpers)
+  if (team.some(helper => helper.id === fresh.id)) return
+  const parent = fresh.parent && team.some(helper => helper.id === fresh.parent) ? fresh.parent : undefined
+  const current = (await read($, steps)).find(step => step.status === 'in_progress')
+  const helper: Helper = {
+    id: fresh.id,
+    kind: fresh.kind,
+    name: fresh.name,
+    job: fresh.job,
+    turn: await read($, turnNow),
+    ...(parent ? { parent } : current ? { step: current.title } : {}),
+    at: await $.clock.now(),
+    status: 'running',
+  }
+  await update($, helpers, list => [...list, helper].slice(-60))
+}
+
+// A helper ended. One of an earlier task (it ran on in the background) updates that
+// task's history, and then leaves.
+async function endHelper($: EngineInterface, id: string, status: HelperStatus) {
+  const team = await read($, helpers)
+  const helper = team.find(one => one.id === id)
+  if (!helper || helper.status !== 'running') return
+  const at = await $.clock.now()
+  await update($, helpers, list => list.map(one => (one.id === id ? { ...one, status, endAt: at } : one)))
+  const isShown = helper.turn === (await read($, turnNow))
+  if (isShown && (await read($, isWorking))) return
+
+  const ended = (await read($, helpers)).filter(one => one.turn === helper.turn)
+  const before = await $.store.get('history')
+  const kept = Array.isArray(before) ? (before as HistoryEntry[]) : []
+  const entry = kept.find(old => old.id === helper.turn)
+  if (entry) {
+    const lastTitle = entry.steps[entry.steps.length - 1]?.title
+    const patched: HistoryEntry = {
+      ...entry,
+      steps: entry.steps.map(step => {
+        const team = historyHelpers(ended, step.title, step.title === lastTitle)
+        return team.length > 0 ? { ...step, helpers: team } : step
+      }),
+    }
+    await $.store.set('history', kept.map(old => (old.id === entry.id ? patched : old)))
+  }
+  if (!isShown) {
+    await update($, helpers, list => list.filter(one => one.turn !== helper.turn || one.status === 'running'))
+  }
+}
+
+// The task id and how it ended, from a background task's notice.
+const taskNotice = (text: string) => {
+  const id = /<task-id>([^<]+)<\/task-id>/.exec(text)?.[1]?.trim()
+  const status = /<status>([^<]+)<\/status>/.exec(text)?.[1]?.trim()
+  return id && status ? { id, status } : null
+}
+
+const rowText = (content: unknown) =>
+  typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content
+          .map(block => (block && typeof block === 'object' && 'text' in block ? String((block as { text: unknown }).text) : ''))
+          .join('\n')
+      : ''
 
 // The mod was called focus-list before: once, its saved history and on/off choice come
 // along from that name's own file (where a shell can read it).
@@ -333,6 +429,7 @@ export const register: Register = (on, options) => {
   const hasSkillsLine = options.skillsLine !== false
   const hasImagesRow = options.imagesRow !== false
   const keepsFinished = options.keepFinished !== false
+  const hasHelpers = options.helpers !== false
 
   on('session.start', async ($, e, next) => {
     await bringOldSaves($)
@@ -417,14 +514,59 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  // A helper starts: kept under the step Claude is on (or the helper that started it).
+  on('agent.spawn', async ($, e, next) => {
+    const started = await next(e)
+    if (!hasHelpers || started.deny !== undefined || !started.agentId || !(await read($, isOn))) return started
+    await addHelper($, {
+      id: started.agentId,
+      kind: 'agent',
+      name: e.subagentType,
+      job: e.description,
+      ...(e.parentAgentId ? { parent: e.parentAgentId } : {}),
+    })
+
+    return started
+  }).catch(($, e, next) => next(e))
+
   on('turn.start', async ($, e, next) => {
-    if (e.agentId === undefined && (await read($, isOn))) {
+    // A helper's own run starting: one with no spawn of its own (a forked skill) is
+    // found in the session's agents.
+    if (e.agentId !== undefined) {
+      if (hasHelpers && (await read($, isOn))) {
+        const id = e.agentId
+        const known = (await read($, helpers)).find(helper => helper.id === id)
+        if (known) {
+          await update($, helpers, list =>
+            list.map(helper => (helper.id === id ? { ...helper, status: 'running' as const, endAt: undefined } : helper)),
+          )
+        } else {
+          const info = (await $.agent.list()).find(agent => agent.id === id)
+          if (info) {
+            await addHelper($, {
+              id,
+              kind: 'agent',
+              name: info.type,
+              job: info.description,
+              ...(info.parentId ? { parent: info.parentId } : {}),
+            })
+          }
+        }
+      }
+
+      return next(e)
+    }
+    if (await read($, isOn)) {
       const at = await $.clock.now()
       await update($, steps, () => [])
       await update($, activity, () => [])
       await update($, doneAt, () => ({}))
       await update($, finish, () => null)
       await update($, openStep, () => null)
+      await update($, openHelper, () => null)
+      await update($, turnNow, () => e.turnId)
+      // Helpers of earlier tasks stay only while they still run (their task's history waits on them).
+      await update($, helpers, list => list.filter(helper => helper.status === 'running'))
       await update($, turnTitle, () => (e.text.split('\n').find(line => line.trim().length > 0) ?? '').trim())
       const typed = await read($, pendingSkills)
       await update($, skills, () => typed)
@@ -448,6 +590,12 @@ export const register: Register = (on, options) => {
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
     if (e.agentId !== undefined || !(await read($, isOn))) return stored
+
+    // A background task's notice says how a helper or a background command ended.
+    if (hasHelpers && e.message.role === 'user') {
+      const notice = taskNotice(rowText(e.message.content))
+      if (notice) await endHelper($, notice.id, helperEnd(notice.status))
+    }
 
     // Pictures you give and pictures Claude's tools bring back: thumbnails for the list.
     // One given before its turn starts is held for that turn, as a typed skill is.
@@ -479,7 +627,26 @@ export const register: Register = (on, options) => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
-    if (e.agentId !== undefined || !(await read($, isWorking))) return next(e)
+    // A helper's own action: kept under the helper, the newest its "now".
+    if (e.agentId !== undefined) {
+      const id = e.agentId
+      if (!hasHelpers || PLAN_KEEPING.includes(e.tool) || !(await read($, helpers)).some(helper => helper.id === id)) {
+        return next(e)
+      }
+      const title = describe(e.tool, e as unknown as Record<string, unknown>)
+      const doing: Activity = { id: e.tool_use_id, title, at: await $.clock.now(), helper: id }
+      await update($, activity, list => [...list, doing].slice(-300))
+      await update($, helpers, list => list.map(helper => (helper.id === id ? { ...helper, now: title } : helper)))
+      const ran = await next(e)
+      const endAt = await $.clock.now()
+      const failed = ran.isError === true ? failureReason(ran.text) : undefined
+      await update($, activity, list =>
+        list.map(action => (action.id === e.tool_use_id ? { ...action, endAt, ...(failed ? { failed } : {}) } : action)),
+      )
+
+      return ran
+    }
+    if (!(await read($, isWorking))) return next(e)
 
     const input = e as unknown as Record<string, unknown>
     await update($, turnTools, list => capped([...list, e.tool_use_id]))
@@ -549,6 +716,24 @@ export const register: Register = (on, options) => {
       )
     }
 
+    // A command left running in the background is a helper until its notice says it ended;
+    // one Claude stops ends there.
+    if (hasHelpers && e.tool === 'Bash' && ran.deny === undefined && !ran.isError) {
+      const backgroundId = (ran.result as { backgroundTaskId?: unknown } | undefined)?.backgroundTaskId
+      if (typeof backgroundId === 'string') {
+        await addHelper($, {
+          id: backgroundId,
+          kind: 'shell',
+          name: typeof input.description === 'string' ? input.description : short(String(input.command ?? ''), 40),
+          job: '',
+        })
+      }
+    }
+    if (hasHelpers && e.tool === 'TaskStop' && ran.deny === undefined && !ran.isError) {
+      const stopped = input.task_id ?? input.shell_id
+      if (typeof stopped === 'string') await endHelper($, stopped, 'stopped')
+    }
+
     if (e.tool === 'TaskCreate' && ran.deny === undefined && !ran.isError) {
       const task = (ran.result as { task?: { id?: string; subject?: string } } | undefined)?.task
       if (task?.id) {
@@ -562,7 +747,12 @@ export const register: Register = (on, options) => {
 
   // The turn is over: hide what it wrote, keep only its final message, and file it in the history.
   on('turn.complete', async ($, e, next) => {
-    if (e.agentId === undefined && (await read($, isWorking))) {
+    if (e.agentId !== undefined) {
+      if (hasHelpers) await endHelper($, e.agentId, helperEnd(e.reason))
+
+      return next(e)
+    }
+    if (await read($, isWorking)) {
       stopTicking()
       const answer = trimmed(e.answer)
       const texts = await read($, turnTexts)
@@ -652,7 +842,7 @@ export const register: Register = (on, options) => {
   // A click on a step or a task opens it; it must not leave the row lit. The engine marks
   // the row a click lands on until Esc, so the ring is kept off this mod's rows.
   on('ui.focus', async ($, e, next) => {
-    if (e.origin.kind === 'person' && e.plugin === NAME && /^(step|task|setting):/.test(e.element ?? '')) return {}
+    if (e.origin.kind === 'person' && e.plugin === NAME && /^(step|task|setting|helper):/.test(e.element ?? '')) return {}
 
     return next(e)
   })
@@ -667,8 +857,12 @@ export const register: Register = (on, options) => {
     const { Box, Button, Text } = $.ui.resolve(e)
     const at = await read($, clock)
     const list = await read($, steps)
-    const recent = await read($, activity)
+    const everything = await read($, activity)
+    const recent = everything.filter(action => action.helper === undefined)
     const opened = await read($, openStep)
+    const openedHelper = await read($, openHelper)
+    const turnId = await read($, turnNow)
+    const team = hasHelpers ? (await read($, helpers)).filter(helper => helper.turn === turnId) : []
     const used = hasSkillsLine ? await read($, skills) : []
     const skillRows = used.length > 0 ? 2 : 0
     const pictures = hasImagesRow ? await read($, images) : []
@@ -683,9 +877,12 @@ export const register: Register = (on, options) => {
     const actionsOf = (title: string) => recent.filter(action => action.step === title)
     const failuresOf = (title: string) => actionsOf(title).filter(action => action.failed)
 
+    // The helpers a step started (by title); undefined: those started before any plan.
+    const stepHelpers = (title: string | undefined) => team.filter(helper => !helper.parent && helper.step === title)
+
     // A step's row is a button: a press opens its actions under it, another closes them.
     const stepButton = (step: Step, children: RenderChildren[], isDim: boolean) => {
-      const hasActions = actionsOf(step.title).length > 0
+      const hasActions = actionsOf(step.title).length > 0 || stepHelpers(step.title).length > 0
       const mark = !hasActions ? '  ' : opened === step.title ? '▾ ' : '▸ '
 
       return (
@@ -701,41 +898,105 @@ export const register: Register = (on, options) => {
       )
     }
 
-    // The opened step's actions, each with how it went and how long it took; the newest kept.
-    const openedActions = (step: Step) => {
-      if (opened !== step.title) return []
-      const actions = actionsOf(step.title)
+    // Actions, each with how it went and how long it took; the newest kept.
+    const actionLines = (actions: Activity[], pad: string) => {
       const shown = actions.slice(-OPEN_ACTIONS)
       const earlier = actions.length - shown.length
+      const room = Math.max(12, width - pad.length - 8)
 
       return [
-        ...(earlier > 0 ? [<Text dimColor>      … {plural(earlier, 'earlier action', 'earlier actions')}</Text>] : []),
+        ...(earlier > 0 ? [<Text dimColor>{`${pad}  … ${plural(earlier, 'earlier action', 'earlier actions')}`}</Text>] : []),
         ...shown.map(action =>
           action.failed ? (
             <Text>
-              {'    '}
-              <Text color="error">✗ {short(action.title, width - 12)}</Text>
+              {pad}
+              <Text color="error">✗ {short(action.title, room)}</Text>
               <Text dimColor> {action.endAt ? since(action.at, action.endAt) : ''}</Text>
             </Text>
           ) : action.endAt ? (
             <Text dimColor>
-              {'    '}
-              <Text color="success">✓</Text> {short(action.title, width - 12)} {since(action.at, action.endAt)}
+              {pad}
+              <Text color="success">✓</Text> {short(action.title, room)} {since(action.at, action.endAt)}
             </Text>
           ) : (
             <Text>
-              {'    '}
-              <Text color="claude">{spin}</Text> {short(action.title, width - 12)}
+              {pad}
+              <Text color="claude">{spin}</Text> {short(action.title, room)}
               <Text dimColor> {since(action.at, at)}</Text>
             </Text>
           ),
         ),
       ]
     }
+
+    // The opened step's actions.
+    const openedActions = (step: Step) => (opened === step.title ? actionLines(actionsOf(step.title), '    ') : [])
+
+    // A helper's row: what it is (⚇ a subagent, ▶ a background command), how it stands and
+    // for how long; a running one says what it does now. A press opens its actions; the
+    // helpers it started stand one level in, deeper ones counted.
+    const helperBlock = (helper: Helper, depth: number): RenderChildren[] => {
+      const pad = `    ${'    '.repeat(depth)}`
+      const isRunning = helper.status === 'running'
+      const isOpen = openedHelper === helper.id
+      const started = team.filter(one => one.parent === helper.id)
+      const state =
+        helper.status === 'running' ? (
+          <Text color="claude">{spin}</Text>
+        ) : helper.status === 'done' ? (
+          <Text color="success">✓</Text>
+        ) : helper.status === 'failed' ? (
+          <Text color="error">✗</Text>
+        ) : (
+          <Text color="warning">■</Text>
+        )
+      const time = `${isRunning && !working ? 'still running · ' : ''}${since(helper.at, helper.endAt ?? at)}`
+      const jobRoom = Math.max(10, width - pad.length - helper.name.length - time.length - 12)
+
+      return [
+        <Button
+          key={`helper:${helper.id}`}
+          plain
+          dimColor={!isRunning}
+          onPress={() => update($, openHelper, current => (current === helper.id ? null : helper.id))}
+        >
+          {pad}
+          <Text dimColor>{helper.kind === 'agent' ? '⚇' : '▶'}</Text>
+          {' '}
+          {state}
+          {' '}
+          <Text bold={isRunning}>{short(helper.name, 28)}</Text>
+          {helper.job ? <Text dimColor>{` · ${short(helper.job, jobRoom)}`}</Text> : ''}
+          <Text dimColor>{` · ${time}`}</Text>
+          {depth >= 1 && started.length > 0 ? <Text dimColor>{` · ${plural(started.length, 'helper', 'helpers')}`}</Text> : ''}
+        </Button>,
+        ...(isOpen
+          ? actionLines(everything.filter(action => action.helper === helper.id), `${pad}    `)
+          : isRunning && helper.now
+            ? [<Text dimColor>{`${pad}    └ ${short(helper.now, Math.max(10, width - pad.length - 6))}`}</Text>]
+            : []),
+        ...(depth < 1 ? started.flatMap(one => helperBlock(one, depth + 1)) : []),
+      ]
+    }
+
+    // A step's helpers: all of them on the step Claude is on (or one opened); elsewhere the
+    // running ones, the rest folded into a count on the step's row.
+    const isWhole = (step: Step) => (working && step.status === 'in_progress') || opened === step.title
+    const helperRows = (step: Step) =>
+      stepHelpers(step.title)
+        .filter(helper => isWhole(step) || helper.status === 'running')
+        .flatMap(helper => helperBlock(helper, 0))
+    const foldedHelpers = (step: Step) => {
+      if (isWhole(step)) return ''
+      const folded = stepHelpers(step.title).filter(helper => helper.status !== 'running').length
+      return folded > 0 ? <Text dimColor>{` · ${plural(folded, 'helper', 'helpers')}`}</Text> : ''
+    }
+    const looseHelpers = stepHelpers(undefined).flatMap(helper => helperBlock(helper, 0))
+
     const openedRows = (() => {
-      if (opened === null) return 0
-      const count = actionsOf(opened).length
-      return Math.min(count, OPEN_ACTIONS) + (count > OPEN_ACTIONS ? 1 : 0)
+      const stepRows = opened === null ? 0 : Math.min(actionsOf(opened).length, OPEN_ACTIONS + 1)
+      const helperRowsNow = list.reduce((sum, step) => sum + helperRows(step).length, 0) + looseHelpers.length
+      return stepRows + helperRowsNow
     })()
 
     // The task's pictures as thumbnails, the newest that fit; the rest counted.
@@ -822,12 +1083,14 @@ export const register: Register = (on, options) => {
           {hidden > 0 && <Text dimColor>  … {hidden} more above</Text>}
           {shown.flatMap(step => [
             step.status === 'completed'
-              ? stepButton(step, [<Text color="success">✓</Text>, ` ${short(step.title, width)}`, failedTries(step)], true)
+              ? stepButton(step, [<Text color="success">✓</Text>, ` ${short(step.title, width)}`, failedTries(step), foldedHelpers(step)], true)
               : step.status === 'in_progress'
-                ? stepButton(step, [<Text color="warning">■</Text>, ` ${short(step.title, width)}`, failedTries(step)], true)
-                : stepButton(step, [`○ ${short(step.title, width)}`], true),
+                ? stepButton(step, [<Text color="warning">■</Text>, ` ${short(step.title, width)}`, failedTries(step), foldedHelpers(step)], true)
+                : stepButton(step, [`○ ${short(step.title, width)}`, foldedHelpers(step)], true),
             ...openedActions(step),
+            ...(list.length > 0 ? helperRows(step) : []),
           ])}
+          {looseHelpers}
           {skillLine('Used', false)}
           {imageLine(false)}
         </Box>
@@ -886,6 +1149,7 @@ export const register: Register = (on, options) => {
               <Text color="claude">{spin}</Text> Making a plan{DOTS[Math.floor(frame / 3) % DOTS.length]}
             </Text>
           )}
+          {looseHelpers}
           {skillLine('Skills', true)}
           {imageLine(true)}
         </Box>
@@ -947,10 +1211,12 @@ export const register: Register = (on, options) => {
                   ' ',
                   isFresh ? <Text bold>{short(step.title, width)}</Text> : short(step.title, width),
                   failures > 0 ? <Text color="error"> · {plural(failures, 'failed try', 'failed tries')}</Text> : '',
+                  foldedHelpers(step),
                 ],
                 !isFresh,
               ),
               ...openedActions(step),
+              ...helperRows(step),
             ]
           }
           if (step.status === 'in_progress') {
@@ -967,6 +1233,7 @@ export const register: Register = (on, options) => {
                 false,
               ),
               ...(opened === step.title ? openedActions(step) : [...(failureLine ? [failureLine] : []), ...(nowLine ? [nowLine] : [])]),
+              ...helperRows(step),
             ]
           }
           if (index === nextAt) {
@@ -977,8 +1244,9 @@ export const register: Register = (on, options) => {
               </Text>,
             ]
           }
-          return [<Text dimColor>  ○ {short(step.title, width)}</Text>]
+          return [<Text dimColor>  ○ {short(step.title, width)}</Text>, ...helperRows(step)]
         })}
+        {looseHelpers}
         {skillLine('Skills', true)}
         {imageLine(true)}
       </Box>
@@ -996,7 +1264,7 @@ export const register: Register = (on, options) => {
           <Text>Claude Code does not list this mod's switches here.</Text>
           <Text dimColor>Set them in ~/.claude/settings.json:</Text>
           <Text dimColor>{`  "pluginConfigs": { "${NAME}@inline": { "options": { "skillsLine": false } } }`}</Text>
-          <Text dimColor>The switches: hideText, skillsLine, imagesRow, keepFinished (all on by default).</Text>
+          <Text dimColor>The switches: hideText, skillsLine, imagesRow, helpers, keepFinished (all on by default).</Text>
         </Box>
       )
     }
@@ -1072,7 +1340,7 @@ export const register: Register = (on, options) => {
 
           return [
             row,
-            ...entry.steps.map(step => (
+            ...entry.steps.flatMap(step => [
               <Text dimColor={step.status === 'completed'}>
                 {'    '}
                 {step.status === 'completed' ? (
@@ -1084,8 +1352,26 @@ export const register: Register = (on, options) => {
                 )}{' '}
                 {short(step.title, width - 8)}
                 {step.failures > 0 ? <Text color="error"> · {plural(step.failures, 'failed try', 'failed tries')}</Text> : ''}
-              </Text>
-            )),
+              </Text>,
+              ...(step.helpers ?? []).map(helper => (
+                <Text dimColor>
+                  {'        '}
+                  {helper.kind === 'agent' ? '⚇ ' : '▶ '}
+                  {helper.status === 'done' ? (
+                    <Text color="success">✓</Text>
+                  ) : helper.status === 'failed' ? (
+                    <Text color="error">✗</Text>
+                  ) : helper.status === 'stopped' ? (
+                    <Text color="warning">■</Text>
+                  ) : (
+                    '…'
+                  )}
+                  {` ${short(helper.name, 28)}${helper.job ? ` · ${short(helper.job, Math.max(10, width - 50))}` : ''} · ${
+                    helper.status === 'running' ? 'still running' : since(0, helper.seconds * 1000)
+                  }`}
+                </Text>
+              )),
+            ]),
             <Text dimColor>{`    ${doneSteps} of ${entry.steps.length} done${extras.length > 0 ? `   ${extras.join('   ')}` : ''}`}</Text>,
             ...(entry.summary ? [<Text italic>{`    “${short(entry.summary, width - 8)}”`}</Text>] : []),
             <Text> </Text>,

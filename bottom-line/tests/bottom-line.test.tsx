@@ -402,3 +402,74 @@ test('history: each finished task is kept; /bottom-line history lists them, a pr
   expect(opened.some(t => t.includes('2 of 2 done'))).toBe(true)
   expect(opened.some(t => t.includes('“All good for Add the images row.”'))).toBe(true)
 })
+
+test('helpers: a subagent stands under its step with what it does now; opens on a press; nests one level; folds into a count once its step is done', async ($, on) => {
+  let at = 1_000
+  standIns(on, () => at)
+  on('tool.call', () => ({ result: {} }))
+  let next = 0
+  on('agent.spawn', () => ({ model: 'm', agentId: `a${++next}` }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'review', turnId: 't1' })
+  await $.tool.call({ tool: PLAN, steps: [{ title: 'Review for bugs', status: 'in_progress' }, { title: 'Write the summary', status: 'pending' }] } as never)
+  await $.agent.spawn({ prompt: 'Find the callers', description: 'Find the callers', subagentType: 'Explore' } as never)
+  await $.agent.spawn({ prompt: 'Look deeper', description: 'Look deeper', subagentType: 'general-purpose', parentAgentId: 'a1' } as never)
+  await $.tool.call({ tool: 'Read', file_path: '/x/StageModel.swift', agentId: 'a1', tool_use_id: 'h1' } as never)
+  at += 4_000
+
+  const band = await $.ui.mount({ ...BAND, requestId: 'h1' })
+  const buttons = (await band.findAll({ type: 'Button' })).map(b => b.text)
+  expect(buttons.some(t => t.includes('⚇') && t.includes('Explore') && t.includes('Find the callers') && t.includes('4s'))).toBe(true)
+  expect(buttons.some(t => t.includes('general-purpose') && t.startsWith('        '))).toBe(true)
+  expect((await band.findAll({ type: 'Text' })).some(t => t.text.includes('└ Reading StageModel.swift'))).toBe(true)
+
+  await band.press({ key: 'helper:a1' })
+  expect((await band.findAll({ type: 'Text' })).some(t => t.text.includes('Reading StageModel.swift') && t.text.includes('0s'))).toBe(true)
+  await band.press({ key: 'helper:a1' })
+  await band.unmount()
+
+  // The helpers end; the step finishes: they fold into a count on its row.
+  await $.turn.complete({ answer: 'Found.', durationMs: 5, isAborted: false, turnId: 'x1', agentId: 'a2', reason: 'answer' } as never)
+  await $.turn.complete({ answer: 'Found.', durationMs: 5, isAborted: false, turnId: 'x2', agentId: 'a1', reason: 'answer' } as never)
+  await $.tool.call({ tool: PLAN, steps: [{ title: 'Review for bugs', status: 'completed' }, { title: 'Write the summary', status: 'in_progress' }] } as never)
+  const later = await $.ui.mount({ ...BAND, requestId: 'h2' })
+  const rows = (await later.findAll({ type: 'Button' })).map(b => b.text)
+  expect(rows.some(t => t.includes('Review for bugs') && t.includes('1 helper'))).toBe(true)
+  expect(rows.some(t => t.includes('Explore'))).toBe(false)
+})
+
+test('background commands: a ▶ row under its step, still running after the task, its notice ends it and updates the history', async ($, on) => {
+  let at = 1_000
+  const memory = new Map<string, unknown>()
+  standIns(on, () => at, memory)
+  on('tool.call', (_, e) =>
+    (e as { tool: string }).tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } } : { result: {} },
+  )
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'serve it', turnId: 't1' })
+  await $.tool.call({ tool: PLAN, steps: [{ title: 'Start the server', status: 'in_progress' }] } as never)
+  await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true, tool_use_id: 'b1' } as never)
+  at += 60_000
+  await $.turn.complete({ answer: 'Server up.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  const done = await $.ui.mount({ ...BAND, requestId: 'g1' })
+  const rows = (await done.findAll({ type: 'Button' })).map(b => b.text)
+  expect(rows.some(t => t.includes('▶') && t.includes('Start the dev server') && t.includes('still running · 1m 0s'))).toBe(true)
+  await done.unmount()
+  const kept = () => ((memory.get('history') as { steps: { helpers?: { status: string }[] }[] }[])[0]?.steps[0]?.helpers ?? [])
+  expect(kept()[0]?.status).toBe('running')
+
+  // Its notice arrives: it ends, and the task's history says so.
+  at += 30_000
+  await $.session.append({
+    message: { type: 'user', role: 'user', content: [{ type: 'text', text: '<task-notification><task-id>bg1</task-id><status>completed</status></task-notification>' }] },
+    door: 'delivery',
+    origin: { kind: 'task-notification' },
+    uuid: 'n1',
+  } as never)
+  expect(kept()[0]?.status).toBe('done')
+  const after = await $.ui.mount({ ...BAND, requestId: 'g2' })
+  expect((await after.findAll({ type: 'Button' })).some(b => b.text.includes('still running'))).toBe(false)
+})
