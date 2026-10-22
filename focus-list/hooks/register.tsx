@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer } from 'claude-code'
 
-import type { Activity, Step, StepStatus } from '../types'
+import type { Activity, Step, StepStatus, Thumb } from '../types'
 
 const NAME = 'focus-list'
 const PLAN_TOOL = 'mcp__focus-list__plan'
@@ -21,6 +21,8 @@ const doneAt = atom({ plugin: 'focus-list', key: 'doneAt' } as const, {})
 const finish = atom({ plugin: 'focus-list', key: 'finish' } as const, null)
 const skills = atom({ plugin: 'focus-list', key: 'skills' } as const, [])
 const pendingSkills = atom({ plugin: 'focus-list', key: 'pendingSkills' } as const, [])
+const images = atom({ plugin: 'focus-list', key: 'images' } as const, [])
+const pendingImages = atom({ plugin: 'focus-list', key: 'pendingImages' } as const, [])
 const turnTexts = atom({ plugin: 'focus-list', key: 'turnTexts' } as const, [])
 const turnTools = atom({ plugin: 'focus-list', key: 'turnTools' } as const, [])
 const summaries = atom({ plugin: 'focus-list', key: 'summaries' } as const, [])
@@ -32,6 +34,72 @@ const PULSE = ['╸', '━', '╸', ' ']
 const BAR = 18
 const DOTS = ['', '.', '..', '...']
 const TWINKLE = ['✦', '✦', '✧', '✧']
+
+const THUMB_ROWS = 4
+const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i
+
+// Every base64 picture in a row's blocks, a tool result's own blocks included.
+type FoundImage = { data: string; toolUseId?: string }
+const imageBlocks = (content: unknown, toolUseId?: string): FoundImage[] => {
+  if (!Array.isArray(content)) return []
+  return content.flatMap((block: unknown): FoundImage[] => {
+    if (!block || typeof block !== 'object') return []
+    const b = block as { type?: unknown; source?: { type?: unknown; data?: unknown }; content?: unknown; tool_use_id?: unknown }
+    if (b.type === 'image' && b.source?.type === 'base64' && typeof b.source.data === 'string') {
+      return [{ data: b.source.data, toolUseId }]
+    }
+    if (b.type === 'tool_result') return imageBlocks(b.content, typeof b.tool_use_id === 'string' ? b.tool_use_id : undefined)
+    return []
+  })
+}
+
+// A small PNG of one picture, whatever its kind, made by the Mac's own sips in the
+// person's cache (a day's worth kept); its box is as wide as its shape asks.
+async function makeThumb(
+  $: EngineInterface,
+  data: string,
+  id: string,
+): Promise<{ file?: string; png?: string; columns: number } | null> {
+  const script = [
+    'd="$HOME/Library/Caches/focus-list"; mkdir -p "$d" && find "$d" -type f -mtime +1 -delete',
+    'i="$d/$1.src"; o="$d/$1.png"',
+    'base64 -D -o "$i" && sips -s format png -Z 320 "$i" --out "$o" >/dev/null 2>&1 && rm -f "$i"',
+    'sips -g pixelWidth -g pixelHeight "$o" | awk -v o="$o" \'/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{printf "%s\\t%s\\t%s", o, w, h}\'',
+  ].join('\n')
+  try {
+    const ran = await $.process.run(['/bin/sh', '-c', script, 'sh', id], { stdin: data, timeoutMs: 20000 })
+    const [file, width, height] = ran.stdout.trim().split('\t')
+    const w = Number(width)
+    const h = Number(height)
+    if (ran.exitCode === 0 && file && w > 0 && h > 0) return { file, columns: boxColumns(w, h) }
+  } catch {
+    // No shell or no sips (Linux, Windows): a PNG can still be shown as it is.
+  }
+
+  return pngAsItIs(data)
+}
+
+// A terminal cell is about twice as tall as it is wide.
+const boxColumns = (width: number, height: number) =>
+  Math.max(4, Math.min(24, Math.round((THUMB_ROWS * 2 * width) / height)))
+
+// A PNG small enough to hand the terminal whole (1 MiB), sized from its own header.
+const PNG_SIGNATURE = 'iVBORw0KGgo'
+const pngAsItIs = (data: string) => {
+  if (!data.startsWith(PNG_SIGNATURE) || (data.length * 3) / 4 > 1024 * 1024) return null
+  try {
+    const head = atob(data.slice(0, 32))
+    const word = (at: number) =>
+      ((head.charCodeAt(at) << 24) | (head.charCodeAt(at + 1) << 16) | (head.charCodeAt(at + 2) << 8) | head.charCodeAt(at + 3)) >>> 0
+    const width = word(16)
+    const height = word(20)
+    if (!(width > 0) || !(height > 0)) return null
+
+    return { png: data, columns: boxColumns(width, height) }
+  } catch {
+    return null
+  }
+}
 
 // Add a skill once, keeping the order skills were first used in.
 const withSkill = (list: string[], name: string) => (list.includes(name) ? list : [...list, name])
@@ -160,6 +228,9 @@ const isHidden = async ($: EngineInterface, text: string) => {
   return (await read($, hiddenTexts)).includes(key)
 }
 
+// What each of Claude's tool calls is called, for naming the pictures it brings back.
+const toolNames = new Map<string, string>()
+
 // The animation's heartbeat: runs only while Claude works.
 let ticker: Timer | undefined
 
@@ -215,6 +286,7 @@ export const register: Register = on => {
   on('tool.check', { tool: PLAN_MATCH }, () => ({ decision: 'allow' }))
 
   on('tool.call', { tool: PLAN_MATCH }, async ($, e) => {
+    if (e.agentId === undefined) await update($, turnTools, list => capped([...list, e.tool_use_id]))
     const input = e as unknown as { steps?: unknown }
     const list = Array.isArray(input.steps) ? input.steps : []
     const plan: Step[] = list.map((step, at) => ({
@@ -248,6 +320,9 @@ export const register: Register = on => {
       const typed = await read($, pendingSkills)
       await update($, skills, () => typed)
       await update($, pendingSkills, () => [])
+      const given = await read($, pendingImages)
+      await update($, images, () => given)
+      await update($, pendingImages, () => [])
       await update($, turnTexts, () => [])
       await update($, turnTools, () => [])
       await update($, turnSince, () => at)
@@ -263,9 +338,25 @@ export const register: Register = on => {
   // Keep every text block the model writes this turn, so it stays hidden afterwards.
   on('session.append', async ($, e, next) => {
     const stored = await next(e)
-    if (e.door !== 'response' || e.agentId !== undefined || !(await read($, isWorking))) {
-      return stored
+    if (e.agentId !== undefined || !(await read($, isOn))) return stored
+
+    // Pictures you give and pictures Claude's tools bring back: thumbnails for the list.
+    // One given before its turn starts is held for that turn, as a typed skill is.
+    if (e.door === 'prompt' || e.door === 'tool-result') {
+      const found = imageBlocks(e.message.content)
+      const isTurn = await read($, isWorking)
+      for (const [index, picture] of found.entries()) {
+        const id = `${e.uuid}-${index}`.replace(/[^A-Za-z0-9-]/g, '')
+        const made = await makeThumb($, picture.data, id)
+        if (made === null) continue
+        const name = picture.toolUseId ? (toolNames.get(picture.toolUseId) ?? 'image') : 'your image'
+        const thumb: Thumb = { id, name, ...made }
+        if (isTurn) await update($, images, list => [...list, thumb].slice(-20))
+        else await update($, pendingImages, list => [...list, thumb].slice(-20))
+      }
     }
+
+    if (e.door !== 'response' || !(await read($, isWorking))) return stored
 
     const content = Array.isArray(e.message.content) ? e.message.content : []
     const texts = content.flatMap(block =>
@@ -283,6 +374,14 @@ export const register: Register = on => {
 
     const input = e as unknown as Record<string, unknown>
     await update($, turnTools, list => capped([...list, e.tool_use_id]))
+    toolNames.set(
+      e.tool_use_id,
+      e.tool === 'Read' && IMAGE_FILE.test(String(input.file_path ?? ''))
+        ? base(input.file_path)
+        : /screenshot|zoom/i.test(e.tool)
+          ? 'screenshot'
+          : e.tool.replace(/^mcp__[^_]+__/, ''),
+    )
 
     if (e.tool === 'TodoWrite') {
       const todos = Array.isArray(input.todos) ? input.todos : []
@@ -382,7 +481,9 @@ export const register: Register = on => {
   on('ui.render', { component: 'ToolUse' }, async ($, e, next) => {
     if (!(await read($, isOn)) || e.props.isExpanded) return next(e)
     const hide =
-      (await read($, isWorking)) || (await read($, hiddenTools)).includes(e.props.tool_use_id)
+      e.props.tool === PLAN_TOOL ||
+      (await read($, isWorking)) ||
+      (await read($, hiddenTools)).includes(e.props.tool_use_id)
     if (!hide) return next(e)
 
     const { Box } = $.ui.resolve(e)
@@ -393,7 +494,9 @@ export const register: Register = on => {
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     if (!(await read($, isOn)) || e.props.isExpanded) return next(e)
     const hide =
-      (await read($, isWorking)) || (await read($, hiddenTools)).includes(e.props.tool_use_id)
+      e.props.tool === PLAN_TOOL ||
+      (await read($, isWorking)) ||
+      (await read($, hiddenTools)).includes(e.props.tool_use_id)
     if (!hide) return next(e)
 
     const { Box } = $.ui.resolve(e)
@@ -406,7 +509,9 @@ export const register: Register = on => {
     const hidden = await read($, hiddenTools)
     const hide =
       (await read($, isWorking)) ||
-      e.props.calls.every(call => call.tool_use_id !== undefined && hidden.includes(call.tool_use_id))
+      e.props.calls.every(
+        call => call.tool === PLAN_TOOL || (call.tool_use_id !== undefined && hidden.includes(call.tool_use_id)),
+      )
     if (!hide) return next(e)
 
     const { Box } = $.ui.resolve(e)
@@ -426,6 +531,45 @@ export const register: Register = on => {
     const recent = await read($, activity)
     const used = await read($, skills)
     const skillRows = used.length > 0 ? 2 : 0
+    const pictures = await read($, images)
+    const Picture = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
+    const imageRows = pictures.length > 0 && Picture ? THUMB_ROWS + 1 : 0
+
+    // The task's pictures as thumbnails, the newest that fit; the rest counted.
+    const imageLine = (isLive: boolean) => {
+      if (imageRows === 0 || !Picture) return []
+      const room = Math.max(10, e.props.bodyColumns - 22)
+      const shown: Thumb[] = []
+      let width = 0
+      for (const picture of [...pictures].reverse()) {
+        if (shown.length > 0 && width + picture.columns + 1 > room) break
+        shown.unshift(picture)
+        width += picture.columns + 1
+      }
+      const earlier = pictures.length - shown.length
+
+      return [
+        <Text> </Text>,
+        <Box flexDirection="row">
+          <Text>
+            {'  '}
+            <Text color="claude">▣</Text> <Text bold={isLive} dimColor={!isLive}>Images</Text>
+            {'  '}
+          </Text>
+          {shown.flatMap((picture, index) => [
+            ...(index > 0 ? [<Text> </Text>] : []),
+            <Picture
+              key={picture.id}
+              source={picture.file ? { file: picture.file, format: 'png' } : { png: picture.png ?? '' }}
+              columns={picture.columns}
+              rows={THUMB_ROWS}
+              alt={`[${short(picture.name, Math.max(3, picture.columns - 2))}]`}
+            />,
+          ])}
+          {earlier > 0 ? <Text dimColor> +{earlier} earlier</Text> : ''}
+        </Box>,
+      ]
+    }
 
     // While working the newest skill twinkles; once done the line is still.
     const skillLine = (label: string, isLive: boolean) => {
@@ -451,7 +595,7 @@ export const register: Register = on => {
 
     if (ended !== null) {
       const width = Math.max(20, e.props.bodyColumns - 6)
-      const room = Math.max(2, e.props.maxRows - 1 - skillRows)
+      const room = Math.max(2, e.props.maxRows - 1 - skillRows - imageRows)
       const rows: Step[] =
         list.length > 0
           ? list
@@ -486,6 +630,7 @@ export const register: Register = on => {
             ),
           )}
           {skillLine('Used', false)}
+          {imageLine(false)}
         </Box>
       )
     }
@@ -495,7 +640,7 @@ export const register: Register = on => {
     const frame = Math.floor(at / TICK)
     const spin = SPINNER[frame % SPINNER.length]
     const width = Math.max(20, e.props.bodyColumns - 8)
-    const room = Math.max(3, e.props.maxRows - 1 - skillRows)
+    const room = Math.max(3, e.props.maxRows - 1 - skillRows - imageRows)
     const now = recent[recent.length - 1]
     const nowLine = now ? (
       <Text dimColor>
@@ -537,6 +682,7 @@ export const register: Register = on => {
             </Text>
           )}
           {skillLine('Skills', true)}
+          {imageLine(true)}
         </Box>
       )
     }
@@ -604,6 +750,7 @@ export const register: Register = on => {
           return [<Text dimColor>  ○ {short(step.title, width)}</Text>]
         })}
         {skillLine('Skills', true)}
+        {imageLine(true)}
       </Box>
     )
   })

@@ -169,3 +169,119 @@ test('skills: a strip while working, the newest lit, each once; a still line whe
   await $.turn.start({ text: 'next', turnId: 't2' })
   expect((await texts('b5')).some(t => t.includes('simplify'))).toBe(false)
 })
+
+test('images: your picture and the ones Claude opens show as thumbnails, still when done, cleared next prompt', async ($, on) => {
+  let at = 1_000
+  const made: string[] = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  on('clock.now', () => ({ value: at }))
+  on('clock.every', () => ({ value: undefined }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'focus-list' } }))
+  on('tool.register', () => ({ value: { tool: PLAN } }))
+  // Stands for sips: a wide picture for the first, a square one after.
+  on('process.run', (_, e) => {
+    const id = String((e as { argv: string[] }).argv[4])
+    made.push(id)
+    const size = made.length === 1 ? '640\t320' : '300\t300'
+    return { value: { exitCode: 0, stdout: `/cache/${id}.png\t${size}`, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  const picture = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'iVBORw0KGgo=' } }
+  const images = async (requestId: string) => {
+    const ui = await $.ui.mount({ ...BAND, requestId })
+    const found = (await ui.findAll({ type: 'Image' } as never)) as unknown as { props?: { source?: { file?: string }; columns?: number; alt?: string } }[]
+    await ui.unmount()
+    return found
+  }
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  // Your picture, pasted with the prompt before the turn starts, is this turn's.
+  await $.session.append({ message: { type: 'user', role: 'user', content: [{ type: 'text', text: 'look' }, picture] }, door: 'prompt', origin: { kind: 'person' }, uuid: 'u1' } as never)
+  await $.turn.start({ text: 'look', turnId: 't1' })
+
+  // A picture Claude opens comes back in the tool's result.
+  await $.tool.call({ tool: 'Read', file_path: '/x/dock.png', tool_use_id: 'r1' } as never)
+  await $.session.append({ message: { type: 'user', role: 'user', content: [{ type: 'tool_result', tool_use_id: 'r1', content: [picture] }] }, door: 'tool-result', origin: { kind: 'tool', tool: 'Read' }, uuid: 'u2' } as never)
+
+  const working = await images('i1')
+  expect(working).toHaveLength(2)
+
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+  expect(await images('i2')).toHaveLength(2)
+
+  await $.turn.start({ text: 'next', turnId: 't2' })
+  expect(await images('i3')).toHaveLength(0)
+  expect(made).toHaveLength(2)
+})
+
+test("the plan tool's own rows stay hidden after the turn, as every other tool row does", async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  on('clock.now', () => ({ value: 1_000 }))
+  on('clock.every', () => ({ value: undefined }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'focus-list' } }))
+  on('tool.register', () => ({ value: { tool: PLAN } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'go', turnId: 't1' })
+  await $.tool.call({ tool: PLAN, tool_use_id: 'p1', steps: [{ title: 'Do it', status: 'in_progress' }] } as never)
+  await $.turn.complete({ answer: 'Done.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  const row = await $.ui.mount({
+    plugin: 'focus-list',
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'p1',
+    props: { tool_use_id: 'p1', tool: PLAN, input: {}, isRunning: false, isErrored: false, isInterrupted: false },
+  } as never)
+  expect(await row.find({ type: 'Text', text: /engine/ })).toBeUndefined()
+})
+
+test('without sips (Linux, Windows) a PNG still shows as it is, sized from its header; other kinds do not', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  on('clock.now', () => ({ value: 1_000 }))
+  on('clock.every', () => ({ value: undefined }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'focus-list' } }))
+  on('tool.register', () => ({ value: { tool: PLAN } }))
+  on('process.run', () => {
+    throw new Error('no /bin/sh here')
+  })
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+
+  const wide = 'iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAIAAAAt/+nTAAAATklEQVR4nO3PUQkAIBTAwBfHOMY2liH8OITBAtzm7PV1wwUNaEEDWtCAFjSgBQ1oQQNa0IAWNKAFDWhBA1rQgBY0oAUNaEEDWtCAFjx2ASo0AJfYQ3FsAAAAAElFTkSuQmCC'
+  const block = (media: string, data: string) => ({ type: 'image', source: { type: 'base64', media_type: media, data } })
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'look', turnId: 't1' })
+  await $.session.append({ message: { type: 'user', role: 'user', content: [block('image/png', wide), block('image/jpeg', '/9j/4AAQSkZJRg==')] }, door: 'prompt', origin: { kind: 'person' }, uuid: 'u1' } as never)
+
+  const ui = await $.ui.mount({ ...BAND, requestId: 'x1' })
+  const found = (await ui.findAll({ type: 'Image' } as never)) as unknown as { props?: { columns?: number } }[]
+  expect(found).toHaveLength(1)
+})
