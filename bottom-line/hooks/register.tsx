@@ -1,42 +1,52 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, Timer } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren, Timer } from 'claude-code'
 
-import type { Activity, Step, StepStatus, Thumb } from '../types'
+import type { Activity, HistoryEntry, Step, StepStatus, Thumb } from '../types'
 
-const NAME = 'focus-list'
-const PLAN_TOOL = 'mcp__focus-list__plan'
-const PLAN_MATCH = /^mcp__focus-list__plan$/
+const NAME = 'bottom-line'
+const PLAN_TOOL = 'mcp__bottom-line__plan'
+const PLAN_MATCH = /^mcp__bottom-line__plan$/
+const HISTORY_PANE = 'bottom-line-history'
+const SETTINGS_PANE = 'bottom-line-settings'
 const KEEP = 1000
 const TICK = 120
 const FLASH = 1500
 
-const isOn = atom({ plugin: 'focus-list', key: 'isOn' } as const, true)
-const isWorking = atom({ plugin: 'focus-list', key: 'isWorking' } as const, false)
-const steps = atom({ plugin: 'focus-list', key: 'steps' } as const, [])
-const activity = atom({ plugin: 'focus-list', key: 'activity' } as const, [])
-const clock = atom({ plugin: 'focus-list', key: 'clock' } as const, 0)
-const turnSince = atom({ plugin: 'focus-list', key: 'turnSince' } as const, 0)
-const stepSince = atom({ plugin: 'focus-list', key: 'stepSince' } as const, 0)
-const doneAt = atom({ plugin: 'focus-list', key: 'doneAt' } as const, {})
-const finish = atom({ plugin: 'focus-list', key: 'finish' } as const, null)
-const skills = atom({ plugin: 'focus-list', key: 'skills' } as const, [])
-const pendingSkills = atom({ plugin: 'focus-list', key: 'pendingSkills' } as const, [])
-const images = atom({ plugin: 'focus-list', key: 'images' } as const, [])
-const pendingImages = atom({ plugin: 'focus-list', key: 'pendingImages' } as const, [])
-const turnTexts = atom({ plugin: 'focus-list', key: 'turnTexts' } as const, [])
-const turnTools = atom({ plugin: 'focus-list', key: 'turnTools' } as const, [])
-const summaries = atom({ plugin: 'focus-list', key: 'summaries' } as const, [])
-const hiddenTexts = atom({ plugin: 'focus-list', key: 'hiddenTexts' } as const, [])
-const hiddenTools = atom({ plugin: 'focus-list', key: 'hiddenTools' } as const, [])
+const isOn = atom({ plugin: 'bottom-line', key: 'isOn' } as const, true)
+const isWorking = atom({ plugin: 'bottom-line', key: 'isWorking' } as const, false)
+const steps = atom({ plugin: 'bottom-line', key: 'steps' } as const, [])
+const activity = atom({ plugin: 'bottom-line', key: 'activity' } as const, [])
+const clock = atom({ plugin: 'bottom-line', key: 'clock' } as const, 0)
+const turnSince = atom({ plugin: 'bottom-line', key: 'turnSince' } as const, 0)
+const stepSince = atom({ plugin: 'bottom-line', key: 'stepSince' } as const, 0)
+const turnTitle = atom({ plugin: 'bottom-line', key: 'turnTitle' } as const, '')
+const doneAt = atom({ plugin: 'bottom-line', key: 'doneAt' } as const, {})
+const finish = atom({ plugin: 'bottom-line', key: 'finish' } as const, null)
+const openStep = atom({ plugin: 'bottom-line', key: 'openStep' } as const, null)
+const openHistory = atom({ plugin: 'bottom-line', key: 'openHistory' } as const, null)
+const skills = atom({ plugin: 'bottom-line', key: 'skills' } as const, [])
+const pendingSkills = atom({ plugin: 'bottom-line', key: 'pendingSkills' } as const, [])
+const images = atom({ plugin: 'bottom-line', key: 'images' } as const, [])
+const pendingImages = atom({ plugin: 'bottom-line', key: 'pendingImages' } as const, [])
+const turnTexts = atom({ plugin: 'bottom-line', key: 'turnTexts' } as const, [])
+const turnTools = atom({ plugin: 'bottom-line', key: 'turnTools' } as const, [])
+const summaries = atom({ plugin: 'bottom-line', key: 'summaries' } as const, [])
+const hiddenTexts = atom({ plugin: 'bottom-line', key: 'hiddenTexts' } as const, [])
+const hiddenTools = atom({ plugin: 'bottom-line', key: 'hiddenTools' } as const, [])
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const PULSE = ['╸', '━', '╸', ' ']
 const BAR = 18
 const DOTS = ['', '.', '..', '...']
 const TWINKLE = ['✦', '✦', '✧', '✧']
+const OPEN_ACTIONS = 8
+const HISTORY_KEEP = 50
 
 const THUMB_ROWS = 4
 const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i
+
+// Tools that keep the plan, not do the work: never an action of their own.
+const PLAN_KEEPING = ['TodoWrite', 'TaskUpdate', 'TaskCreate', 'TaskList', 'TaskGet', PLAN_TOOL]
 
 // Every base64 picture in a row's blocks, a tool result's own blocks included.
 type FoundImage = { data: string; toolUseId?: string }
@@ -61,7 +71,7 @@ async function makeThumb(
   id: string,
 ): Promise<{ file?: string; png?: string; columns: number } | null> {
   const script = [
-    'd="$HOME/Library/Caches/focus-list"; mkdir -p "$d" && find "$d" -type f -mtime +1 -delete',
+    'd="$HOME/Library/Caches/bottom-line"; mkdir -p "$d" && find "$d" -type f -mtime +1 -delete',
     'i="$d/$1.src"; o="$d/$1.png"',
     'base64 -D -o "$i" && sips -s format png -Z 320 "$i" --out "$o" >/dev/null 2>&1 && rm -f "$i"',
     'sips -g pixelWidth -g pixelHeight "$o" | awk -v o="$o" \'/pixelWidth/{w=$2} /pixelHeight/{h=$2} END{printf "%s\\t%s\\t%s", o, w, h}\'',
@@ -128,12 +138,18 @@ const sweep = (frame: number) => {
   return { before: from, run, after: BAR - from - run }
 }
 
-const PLAN = [
-  '# Focus list',
-  'While you work, the person does not see your text or your tool calls. They see only your plan, live, and when you finish, only your final message.',
-  `- For every prompt, even a question or a one-step task, your very first action is to call ${PLAN_TOOL} with every step, in plain words, the first one in_progress (a question is two steps at least: finding the answer, then writing it). Call it again each time a step finishes or the next one starts, always with the whole list and exactly one step in_progress until all are done. Change the plan when you learn more.`,
-  '- Your final message is the only text the person reads. Make it a complete, short summary: what you did, what you found, and anything they must do or decide.',
-].join('\n')
+// What Claude is told; with its text left on screen, the first line says so.
+const planText = (isTextHidden: boolean) =>
+  [
+    '# Bottom line',
+    isTextHidden
+      ? 'While you work, the person does not see your text or your tool calls. They see only your plan, live, and when you finish, only your final message.'
+      : 'While you work, the person follows your plan, live, above the prompt.',
+    `- For every prompt, even a question or a one-step task, your very first action is to call ${PLAN_TOOL} with every step, in plain words, the first one in_progress (a question is two steps at least: finding the answer, then writing it). Call it again each time a step finishes or the next one starts, always with the whole list and exactly one step in_progress until all are done. Change the plan when you learn more.`,
+    isTextHidden
+      ? '- Your final message is the only text the person reads. Make it a complete, short summary: what you did, what you found, and anything they must do or decide.'
+      : '- End with a complete, short summary: what you did, what you found, and anything they must do or decide.',
+  ].join('\n')
 
 const PLAN_SPEC = {
   name: 'plan',
@@ -170,6 +186,13 @@ const since = (from: number, to: number) => {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`
 }
 
+const clockTime = (at: number) => {
+  const when = new Date(at)
+  return `${String(when.getHours()).padStart(2, '0')}:${String(when.getMinutes()).padStart(2, '0')}`
+}
+
+const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`
+
 // One plain line for what a tool call is doing.
 const describe = (tool: string, input: Record<string, unknown>) => {
   switch (tool) {
@@ -197,6 +220,17 @@ const describe = (tool: string, input: Record<string, unknown>) => {
     default:
       return `Using ${tool.replace(/^mcp__[^_]+__/, '')}`
   }
+}
+
+// Why a call failed, in one line: the exit code where there is one, and the last
+// thing it said (a test run's verdict comes last).
+const failureReason = (text: string | undefined) => {
+  const lines = (text ?? '').split('\n').map(line => line.trim()).filter(line => line.length > 0)
+  if (lines.length === 0) return 'failed'
+  const exit = /^exit code (\d+)$/i.exec(lines[0] ?? '')
+  const last = lines[lines.length - 1] ?? ''
+  if (exit && lines.length > 1) return `exit ${exit[1]} · ${last}`
+  return exit ? `exit ${exit[1]}` : last
 }
 
 const capped = <T,>(list: T[]) => list.slice(-KEEP)
@@ -228,6 +262,54 @@ const isHidden = async ($: EngineInterface, text: string) => {
   return (await read($, hiddenTexts)).includes(key)
 }
 
+// The task just finished, kept for the history panel (newest first, fifty kept).
+async function keepInHistory($: EngineInterface, id: string, isAborted: boolean, answer: string) {
+  const at = await read($, turnSince)
+  const ended = await $.clock.now()
+  const list = await read($, steps)
+  const recent = await read($, activity)
+  const failuresOf = (title: string) => recent.filter(action => action.step === title && action.failed).length
+  const firstStep = list[0]?.title ?? recent[0]?.title ?? 'Task'
+  const asked = (await read($, turnTitle)) || firstStep
+  const entry: HistoryEntry = {
+    id,
+    at,
+    seconds: Math.max(0, Math.round((ended - at) / 1000)),
+    title: short(asked, 80),
+    isAborted,
+    steps:
+      list.length > 0
+        ? list.map(step => ({ title: step.title, status: step.status, failures: failuresOf(step.title) }))
+        : recent.slice(-30).map(action => ({
+            title: action.title,
+            status: 'completed' as const,
+            failures: action.failed ? 1 : 0,
+          })),
+    skills: await read($, skills),
+    images: (await read($, images)).length,
+    summary: short((answer.split('\n').find(line => line.trim().length > 0) ?? '').trim(), 200),
+  }
+  const before = await $.store.get('history')
+  const kept = Array.isArray(before) ? (before as HistoryEntry[]) : []
+  await $.store.set('history', [entry, ...kept.filter(old => old.id !== id)].slice(0, HISTORY_KEEP))
+}
+
+// The mod was called focus-list before: once, its saved history and on/off choice come
+// along from that name's own file (where a shell can read it).
+async function bringOldSaves($: EngineInterface) {
+  if ((await $.store.get('movedFromFocusList')) === true) return
+  await $.store.set('movedFromFocusList', true)
+  try {
+    const ran = await $.process.run(['/bin/sh', '-c', 'cat "$HOME"/.claude/plugins/store/focus-list_*.json 2>/dev/null | head -c 4000000'])
+    if (ran.exitCode !== 0 || !ran.stdout.trim().startsWith('{')) return
+    const old = JSON.parse(ran.stdout) as { isOn?: unknown; history?: unknown }
+    if ((await $.store.get('history')) === undefined && Array.isArray(old.history)) await $.store.set('history', old.history)
+    if ((await $.store.get('isOn')) === undefined && typeof old.isOn === 'boolean') await $.store.set('isOn', old.isOn)
+  } catch {
+    // Nothing to bring: a fresh start under the new name.
+  }
+}
+
 // What each of Claude's tool calls is called, for naming the pictures it brings back.
 const toolNames = new Map<string, string>()
 
@@ -246,13 +328,20 @@ function stopTicking() {
   ticker = undefined
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const isTextHidden = options.hideText !== false
+  const hasSkillsLine = options.skillsLine !== false
+  const hasImagesRow = options.imagesRow !== false
+  const keepsFinished = options.keepFinished !== false
+
   on('session.start', async ($, e, next) => {
+    await bringOldSaves($)
     const stored = await $.store.get('isOn')
     await update($, isOn, () => stored !== false)
     await $.command.register({
       name: NAME,
-      description: 'Turn the focus list on or off (hide Claude’s work, show a live plan and the summary)',
+      description: 'The bottom line: no argument turns it on or off; "history" opens your past tasks; "settings" its switches',
+      argumentHint: '[history | settings]',
     })
     await $.tool.register(PLAN_SPEC)
     if (await read($, isWorking)) startTicking($)
@@ -260,17 +349,35 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: NAME }, async $ => {
+  on('command.run', { command: NAME }, async ($, e) => {
+    const asked = e.args.trim().toLowerCase()
+    if (asked === 'history') {
+      await $.ui.open({ id: HISTORY_PANE, title: 'History' })
+
+      return { text: 'History opened beside the chat.' }
+    }
+    if (asked === 'settings') {
+      await $.ui.open({ id: SETTINGS_PANE, title: 'Bottom line settings' })
+      const rows = (await $.config.list()).filter(row => row.key.startsWith(`${NAME}.`))
+
+      return {
+        text:
+          rows.length === 0
+            ? `Settings opened beside the chat. Change them in ~/.claude/settings.json under "pluginConfigs" → "${NAME}@inline" → "options".`
+            : `Settings opened beside the chat: ${rows.map(row => `${row.label} ${row.value === false ? 'off' : 'on'}`).join(' · ')}.`,
+      }
+    }
+
     const turnOn = !(await read($, isOn))
     await update($, isOn, () => turnOn)
     await $.store.set('isOn', turnOn)
 
     return {
       text: turnOn
-        ? 'Focus list is on. While Claude works you see a live plan; when it finishes, only the summary.'
-        : 'Focus list is off. Claude’s work shows as usual.',
+        ? 'Bottom line is on. While Claude works you see a live plan; when it finishes, only the summary.'
+        : 'Bottom line is off. Claude’s work shows as usual.',
     }
-  }).catch(() => ({ text: 'Focus list could not change. Try again.' }))
+  }).catch(() => ({ text: 'Bottom line could not do that. Try again.' }))
 
   // Ask Claude to keep its plan up to date and to end with a full summary.
   on('prompt.compose', async ($, e, next) => {
@@ -278,7 +385,7 @@ export const register: Register = on => {
     if (!(await read($, isOn))) return composed
 
     return {
-      sections: [...composed.sections, { id: `${NAME}:plan`, text: PLAN, scope: 'session' }],
+      sections: [...composed.sections, { id: `${NAME}:plan`, text: planText(isTextHidden), scope: 'session' }],
     }
   })
 
@@ -317,6 +424,8 @@ export const register: Register = on => {
       await update($, activity, () => [])
       await update($, doneAt, () => ({}))
       await update($, finish, () => null)
+      await update($, openStep, () => null)
+      await update($, turnTitle, () => (e.text.split('\n').find(line => line.trim().length > 0) ?? '').trim())
       const typed = await read($, pendingSkills)
       await update($, skills, () => typed)
       await update($, pendingSkills, () => [])
@@ -342,7 +451,7 @@ export const register: Register = on => {
 
     // Pictures you give and pictures Claude's tools bring back: thumbnails for the list.
     // One given before its turn starts is held for that turn, as a typed skill is.
-    if (e.door === 'prompt' || e.door === 'tool-result') {
+    if (hasImagesRow && (e.door === 'prompt' || e.door === 'tool-result')) {
       const found = imageBlocks(e.message.content)
       const isTurn = await read($, isWorking)
       for (const [index, picture] of found.entries()) {
@@ -416,12 +525,29 @@ export const register: Register = on => {
       const name = input.skill
       await update($, skills, list => withSkill(list, name))
     }
-    if (!['TodoWrite', 'TaskUpdate', 'TaskCreate', 'TaskList', 'TaskGet', PLAN_TOOL].includes(e.tool)) {
-      const doing: Activity = { title: describe(e.tool, input), at: await $.clock.now() }
-      await update($, activity, list => [...list, doing].slice(-50))
+
+    // Each action is kept with the step it belongs to, when it ended and how it went.
+    const isAction = !PLAN_KEEPING.includes(e.tool)
+    if (isAction) {
+      const current = (await read($, steps)).find(step => step.status === 'in_progress')
+      const doing: Activity = {
+        id: e.tool_use_id,
+        title: describe(e.tool, input),
+        at: await $.clock.now(),
+        ...(current ? { step: current.title } : {}),
+      }
+      await update($, activity, list => [...list, doing].slice(-200))
     }
 
     const ran = await next(e)
+
+    if (isAction) {
+      const endAt = await $.clock.now()
+      const failed = ran.isError === true ? failureReason(ran.text) : undefined
+      await update($, activity, list =>
+        list.map(action => (action.id === e.tool_use_id ? { ...action, endAt, ...(failed ? { failed } : {}) } : action)),
+      )
+    }
 
     if (e.tool === 'TaskCreate' && ran.deny === undefined && !ran.isError) {
       const task = (ran.result as { task?: { id?: string; subject?: string } } | undefined)?.task
@@ -434,7 +560,7 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e))
 
-  // The turn is over: hide what it wrote, keep only its final message.
+  // The turn is over: hide what it wrote, keep only its final message, and file it in the history.
   on('turn.complete', async ($, e, next) => {
     if (e.agentId === undefined && (await read($, isWorking))) {
       stopTicking()
@@ -456,6 +582,7 @@ export const register: Register = on => {
           list.map(step => (step.status === 'in_progress' ? { ...step, status: 'completed' as const } : step)),
         )
       }
+      await keepInHistory($, e.turnId, e.isAborted, answer)
       await update($, clock, () => at)
       await update($, finish, () => ({ at, isAborted: e.isAborted }))
       await update($, isWorking, () => false)
@@ -471,7 +598,7 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AssistantMessage' }, async ($, e, next) => {
-    if (!(await read($, isOn)) || !(await isHidden($, e.props.text))) return next(e)
+    if (!isTextHidden || !(await read($, isOn)) || !(await isHidden($, e.props.text))) return next(e)
 
     const { Box } = $.ui.resolve(e)
 
@@ -482,8 +609,8 @@ export const register: Register = on => {
     if (!(await read($, isOn)) || e.props.isExpanded) return next(e)
     const hide =
       e.props.tool === PLAN_TOOL ||
-      (await read($, isWorking)) ||
-      (await read($, hiddenTools)).includes(e.props.tool_use_id)
+      (isTextHidden &&
+        ((await read($, isWorking)) || (await read($, hiddenTools)).includes(e.props.tool_use_id)))
     if (!hide) return next(e)
 
     const { Box } = $.ui.resolve(e)
@@ -495,8 +622,8 @@ export const register: Register = on => {
     if (!(await read($, isOn)) || e.props.isExpanded) return next(e)
     const hide =
       e.props.tool === PLAN_TOOL ||
-      (await read($, isWorking)) ||
-      (await read($, hiddenTools)).includes(e.props.tool_use_id)
+      (isTextHidden &&
+        ((await read($, isWorking)) || (await read($, hiddenTools)).includes(e.props.tool_use_id)))
     if (!hide) return next(e)
 
     const { Box } = $.ui.resolve(e)
@@ -507,10 +634,13 @@ export const register: Register = on => {
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
     if (!(await read($, isOn)) || e.props.isExpanded) return next(e)
     const hidden = await read($, hiddenTools)
+    const isWork = isTextHidden && (await read($, isWorking))
     const hide =
-      (await read($, isWorking)) ||
+      isWork ||
       e.props.calls.every(
-        call => call.tool === PLAN_TOOL || (call.tool_use_id !== undefined && hidden.includes(call.tool_use_id)),
+        call =>
+          call.tool === PLAN_TOOL ||
+          (isTextHidden && call.tool_use_id !== undefined && hidden.includes(call.tool_use_id)),
       )
     if (!hide) return next(e)
 
@@ -519,32 +649,105 @@ export const register: Register = on => {
     return <Box display="none" />
   })
 
+  // A click on a step or a task opens it; it must not leave the row lit. The engine marks
+  // the row a click lands on until Esc, so the ring is kept off this mod's rows.
+  on('ui.focus', async ($, e, next) => {
+    if (e.origin.kind === 'person' && e.plugin === NAME && /^(step|task|setting):/.test(e.element ?? '')) return {}
+
+    return next(e)
+  })
+
   // The live plan, above the prompt, while Claude works; still, once it is done.
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey || !(await read($, isOn))) return next(e)
     const ended = await read($, finish)
-    if (!(await read($, isWorking)) && ended === null) return next(e)
+    const working = await read($, isWorking)
+    if (!working && (ended === null || !keepsFinished)) return next(e)
 
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
     const at = await read($, clock)
     const list = await read($, steps)
     const recent = await read($, activity)
-    const used = await read($, skills)
+    const opened = await read($, openStep)
+    const used = hasSkillsLine ? await read($, skills) : []
     const skillRows = used.length > 0 ? 2 : 0
-    const pictures = await read($, images)
+    const pictures = hasImagesRow ? await read($, images) : []
     const Picture = e.surface === 'terminal' ? $.ui.resolve(e).Image : undefined
     const imageRows = pictures.length > 0 && Picture ? THUMB_ROWS + 1 : 0
+    const frame = Math.floor(at / TICK)
+    const spin = SPINNER[frame % SPINNER.length]
+    const width = Math.max(20, e.props.bodyColumns - 8)
+
+    // A failure's reason takes the room its action's name leaves on the line.
+    const reasonRoom = (title: string) => Math.max(12, width - Math.min(title.length, width / 2) - 8)
+    const actionsOf = (title: string) => recent.filter(action => action.step === title)
+    const failuresOf = (title: string) => actionsOf(title).filter(action => action.failed)
+
+    // A step's row is a button: a press opens its actions under it, another closes them.
+    const stepButton = (step: Step, children: RenderChildren[], isDim: boolean) => {
+      const hasActions = actionsOf(step.title).length > 0
+      const mark = !hasActions ? '  ' : opened === step.title ? '▾ ' : '▸ '
+
+      return (
+        <Button
+          key={`step:${step.id}`}
+          plain
+          dimColor={isDim}
+          onPress={() => update($, openStep, current => (current === step.title ? null : step.title))}
+        >
+          {mark}
+          {children}
+        </Button>
+      )
+    }
+
+    // The opened step's actions, each with how it went and how long it took; the newest kept.
+    const openedActions = (step: Step) => {
+      if (opened !== step.title) return []
+      const actions = actionsOf(step.title)
+      const shown = actions.slice(-OPEN_ACTIONS)
+      const earlier = actions.length - shown.length
+
+      return [
+        ...(earlier > 0 ? [<Text dimColor>      … {plural(earlier, 'earlier action', 'earlier actions')}</Text>] : []),
+        ...shown.map(action =>
+          action.failed ? (
+            <Text>
+              {'    '}
+              <Text color="error">✗ {short(action.title, width - 12)}</Text>
+              <Text dimColor> {action.endAt ? since(action.at, action.endAt) : ''}</Text>
+            </Text>
+          ) : action.endAt ? (
+            <Text dimColor>
+              {'    '}
+              <Text color="success">✓</Text> {short(action.title, width - 12)} {since(action.at, action.endAt)}
+            </Text>
+          ) : (
+            <Text>
+              {'    '}
+              <Text color="claude">{spin}</Text> {short(action.title, width - 12)}
+              <Text dimColor> {since(action.at, at)}</Text>
+            </Text>
+          ),
+        ),
+      ]
+    }
+    const openedRows = (() => {
+      if (opened === null) return 0
+      const count = actionsOf(opened).length
+      return Math.min(count, OPEN_ACTIONS) + (count > OPEN_ACTIONS ? 1 : 0)
+    })()
 
     // The task's pictures as thumbnails, the newest that fit; the rest counted.
     const imageLine = (isLive: boolean) => {
       if (imageRows === 0 || !Picture) return []
       const room = Math.max(10, e.props.bodyColumns - 22)
       const shown: Thumb[] = []
-      let width = 0
+      let used = 0
       for (const picture of [...pictures].reverse()) {
-        if (shown.length > 0 && width + picture.columns + 1 > room) break
+        if (shown.length > 0 && used + picture.columns + 1 > room) break
         shown.unshift(picture)
-        width += picture.columns + 1
+        used += picture.columns + 1
       }
       const earlier = pictures.length - shown.length
 
@@ -593,16 +796,19 @@ export const register: Register = on => {
       ]
     }
 
-    if (ended !== null) {
-      const width = Math.max(20, e.props.bodyColumns - 6)
-      const room = Math.max(2, e.props.maxRows - 1 - skillRows - imageRows)
+    if (!working && ended !== null) {
+      const room = Math.max(2, e.props.maxRows - 1 - skillRows - imageRows - openedRows)
       const rows: Step[] =
         list.length > 0
           ? list
-          : recent.map((step, index) => ({ id: `did:${index}`, title: step.title, status: 'completed' }))
+          : recent.map(action => ({ id: `did:${action.id}`, title: action.title, status: 'completed' }))
       const done = rows.filter(step => step.status === 'completed').length
       const hidden = Math.max(0, rows.length - room)
       const shown = rows.slice(hidden)
+      const failedTries = (step: Step) => {
+        const count = list.length > 0 ? failuresOf(step.title).length : 0
+        return count > 0 ? <Text color="error"> · {plural(count, 'failed try', 'failed tries')}</Text> : ''
+      }
 
       return (
         <Box flexDirection="column">
@@ -614,33 +820,24 @@ export const register: Register = on => {
             </Text>
           </Text>
           {hidden > 0 && <Text dimColor>  … {hidden} more above</Text>}
-          {shown.map(step =>
-            step.status === 'completed' ? (
-              <Text dimColor>
-                {'  '}
-                <Text color="success">✓</Text> {short(step.title, width)}
-              </Text>
-            ) : step.status === 'in_progress' ? (
-              <Text dimColor>
-                {'  '}
-                <Text color="warning">■</Text> {short(step.title, width)}
-              </Text>
-            ) : (
-              <Text dimColor>  ○ {short(step.title, width)}</Text>
-            ),
-          )}
+          {shown.flatMap(step => [
+            step.status === 'completed'
+              ? stepButton(step, [<Text color="success">✓</Text>, ` ${short(step.title, width)}`, failedTries(step)], true)
+              : step.status === 'in_progress'
+                ? stepButton(step, [<Text color="warning">■</Text>, ` ${short(step.title, width)}`, failedTries(step)], true)
+                : stepButton(step, [`○ ${short(step.title, width)}`], true),
+            ...openedActions(step),
+          ])}
           {skillLine('Used', false)}
           {imageLine(false)}
         </Box>
       )
     }
+
     const flashes = await read($, doneAt)
     const turnStart = await read($, turnSince)
     const stepStart = await read($, stepSince)
-    const frame = Math.floor(at / TICK)
-    const spin = SPINNER[frame % SPINNER.length]
-    const width = Math.max(20, e.props.bodyColumns - 8)
-    const room = Math.max(3, e.props.maxRows - 1 - skillRows - imageRows)
+    const room = Math.max(3, e.props.maxRows - 1 - skillRows - imageRows - openedRows)
     const now = recent[recent.length - 1]
     const nowLine = now ? (
       <Text dimColor>
@@ -649,7 +846,7 @@ export const register: Register = on => {
       </Text>
     ) : null
 
-    // No plan yet: the steps taken so far are the list.
+    // No plan yet: the actions taken so far are the list, a failed one marked.
     if (list.length === 0) {
       const done = recent.slice(Math.max(0, recent.length - room + 1), -1)
       const bar = sweep(frame)
@@ -663,12 +860,20 @@ export const register: Register = on => {
             <Text color="claude">{'━'.repeat(bar.run)}</Text>
             <Text dimColor>{'─'.repeat(bar.after)}  {since(turnStart, at)}</Text>
           </Text>
-          {done.map(step => (
-            <Text dimColor>
-              {'  '}
-              <Text color="success">✓</Text> {short(step.title, width)}
-            </Text>
-          ))}
+          {done.map(action =>
+            action.failed ? (
+              <Text>
+                {'  '}
+                <Text color="error">✗ {short(action.title, width / 2)}</Text>
+                <Text dimColor> — {short(action.failed, reasonRoom(action.title))}</Text>
+              </Text>
+            ) : (
+              <Text dimColor>
+                {'  '}
+                <Text color="success">✓</Text> {short(action.title, width)}
+              </Text>
+            ),
+          )}
           {now ? (
             <Text>
               {'  '}
@@ -689,6 +894,7 @@ export const register: Register = on => {
 
     const done = list.filter(step => step.status === 'completed').length
     const currentAt = list.findIndex(step => step.status === 'in_progress')
+    const current = list[currentAt]
     const nextAt = list.findIndex(
       (step, index) => step.status === 'pending' && index > Math.max(currentAt, -1),
     )
@@ -696,8 +902,18 @@ export const register: Register = on => {
     const pulse = filled < BAR ? PULSE[frame % PULSE.length] : ''
     const empty = BAR - filled - (pulse ? 1 : 0)
 
+    // The current step's newest failure stands under it, in red, until the step ends.
+    const lastFailure = current ? failuresOf(current.title).at(-1) : undefined
+    const failureLine = lastFailure ? (
+      <Text>
+        {'    '}
+        <Text color="error">✗ {short(lastFailure.title, width / 2)}</Text>
+        <Text dimColor> — {short(lastFailure.failed ?? '', reasonRoom(lastFailure.title))}</Text>
+      </Text>
+    ) : null
+
     // Keep the current and the next step in view; the done ones give way first.
-    const fixedRows = 1 + (now && currentAt >= 0 ? 1 : 0)
+    const fixedRows = 1 + (now && currentAt >= 0 ? 1 : 0) + (failureLine ? 1 : 0)
     const stepRoom = Math.max(2, room - fixedRows)
     const focus = currentAt >= 0 ? currentAt : Math.max(0, nextAt)
     const start = Math.max(0, Math.min(focus - 1, list.length - stepRoom))
@@ -720,23 +936,37 @@ export const register: Register = on => {
         {start > 0 && <Text dimColor>  … {start} done above</Text>}
         {shown.flatMap(step => {
           const index = list.indexOf(step)
+          const failures = failuresOf(step.title).length
           if (step.status === 'completed') {
             const isFresh = at - (flashes[step.id] ?? 0) < FLASH
             return [
-              <Text dimColor={!isFresh}>
-                {'  '}
-                <Text color="success">✓</Text> {isFresh ? <Text bold>{short(step.title, width)}</Text> : short(step.title, width)}
-              </Text>,
+              stepButton(
+                step,
+                [
+                  <Text color="success">✓</Text>,
+                  ' ',
+                  isFresh ? <Text bold>{short(step.title, width)}</Text> : short(step.title, width),
+                  failures > 0 ? <Text color="error"> · {plural(failures, 'failed try', 'failed tries')}</Text> : '',
+                ],
+                !isFresh,
+              ),
+              ...openedActions(step),
             ]
           }
           if (step.status === 'in_progress') {
             return [
-              <Text>
-                {'  '}
-                <Text color="claude">{spin}</Text> <Text bold>{short(step.title, width - 8)}</Text>
-                <Text dimColor> · {since(stepStart, at)}</Text>
-              </Text>,
-              ...(nowLine ? [nowLine] : []),
+              stepButton(
+                step,
+                [
+                  <Text color="claude">{spin}</Text>,
+                  ' ',
+                  <Text bold>{short(step.title, width - 8)}</Text>,
+                  <Text dimColor> · {since(stepStart, at)}</Text>,
+                  failures > 0 ? <Text color="error"> · ✗ {failures} failed</Text> : '',
+                ],
+                false,
+              ),
+              ...(opened === step.title ? openedActions(step) : [...(failureLine ? [failureLine] : []), ...(nowLine ? [nowLine] : [])]),
             ]
           }
           if (index === nextAt) {
@@ -751,6 +981,116 @@ export const register: Register = on => {
         })}
         {skillLine('Skills', true)}
         {imageLine(true)}
+      </Box>
+    )
+  })
+
+  // The settings panel: the mod's four switches, a press flips one (the mod reloads with it).
+  on('ui.render', { component: 'Pane', requestId: SETTINGS_PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const rows = (await $.config.list()).filter(row => row.key.startsWith(`${NAME}.`))
+
+    if (rows.length === 0) {
+      return (
+        <Box flexDirection="column">
+          <Text>Claude Code does not list this mod's switches here.</Text>
+          <Text dimColor>Set them in ~/.claude/settings.json:</Text>
+          <Text dimColor>{`  "pluginConfigs": { "${NAME}@inline": { "options": { "skillsLine": false } } }`}</Text>
+          <Text dimColor>The switches: hideText, skillsLine, imagesRow, keepFinished (all on by default).</Text>
+        </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>Click a switch to turn it on or off.</Text>
+        <Text> </Text>
+        {rows.flatMap(row => {
+          const isOnNow = row.value !== false
+          return [
+            <Button
+              key={`setting:${row.key}`}
+              plain
+              onPress={() => $.config.set({ key: row.key, value: !isOnNow })}
+            >
+              <Text color={isOnNow ? 'success' : undefined} dimColor={!isOnNow}>{isOnNow ? '● on ' : '○ off'}</Text>
+              {`  ${row.label}`}
+            </Button>,
+            ...(row.description ? [<Text dimColor>{`        ${row.description}`}</Text>] : []),
+            <Text> </Text>,
+          ]
+        })}
+        <Text dimColor>The same switches are in /config, under bottom-line.</Text>
+      </Box>
+    )
+  })
+
+  // The history panel: past tasks newest first, one line each; a press opens one in place.
+  on('ui.render', { component: 'Pane', requestId: HISTORY_PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const stored = await $.store.get('history')
+    const history = Array.isArray(stored) ? (stored as HistoryEntry[]) : []
+    const opened = await read($, openHistory)
+    const width = Math.max(30, e.props.bodyColumns)
+    const titleRoom = Math.max(12, width - 30)
+
+    if (history.length === 0) {
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>No tasks yet. Each task Claude finishes is kept here.</Text>
+        </Box>
+      )
+    }
+
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>{plural(history.length, 'task', 'tasks')}, newest first</Text>
+        <Text> </Text>
+        {history.flatMap(entry => {
+          const isOpen = opened === entry.id
+          const doneSteps = entry.steps.filter(step => step.status === 'completed').length
+          const row = (
+            <Button
+              key={`task:${entry.id}`}
+              plain
+              onPress={() => update($, openHistory, current => (current === entry.id ? null : entry.id))}
+            >
+              {isOpen ? '▾ ' : '▸ '}
+              <Text color={entry.isAborted ? 'warning' : 'success'}>{entry.isAborted ? '■' : '✓'}</Text>
+              {` ${clockTime(entry.at)}  `}
+              <Text dimColor>{since(0, entry.seconds * 1000).padStart(6)}</Text>
+              {`  ${short(entry.title, titleRoom)}`}
+              <Text dimColor>{`  ${plural(entry.steps.length, 'step', 'steps')}`}</Text>
+            </Button>
+          )
+          if (!isOpen) return [row]
+
+          const extras = [
+            ...(entry.skills.length > 0 ? [`✦ ${entry.skills.join(' · ')}`] : []),
+            ...(entry.images > 0 ? [`▣ ${plural(entry.images, 'picture', 'pictures')}`] : []),
+          ]
+
+          return [
+            row,
+            ...entry.steps.map(step => (
+              <Text dimColor={step.status === 'completed'}>
+                {'    '}
+                {step.status === 'completed' ? (
+                  <Text color="success">✓</Text>
+                ) : step.status === 'in_progress' ? (
+                  <Text color="warning">■</Text>
+                ) : (
+                  '○'
+                )}{' '}
+                {short(step.title, width - 8)}
+                {step.failures > 0 ? <Text color="error"> · {plural(step.failures, 'failed try', 'failed tries')}</Text> : ''}
+              </Text>
+            )),
+            <Text dimColor>{`    ${doneSteps} of ${entry.steps.length} done${extras.length > 0 ? `   ${extras.join('   ')}` : ''}`}</Text>,
+            ...(entry.summary ? [<Text italic>{`    “${short(entry.summary, width - 8)}”`}</Text>] : []),
+            <Text> </Text>,
+          ]
+        })}
       </Box>
     )
   })

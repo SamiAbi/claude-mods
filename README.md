@@ -4,7 +4,7 @@ Mods for [Claude Code](https://claude.com/claude-code): small add-ons that chang
 
 ## The mods
 
-### focus-list
+### bottom-line
 
 While Claude works, its text and tool calls are hidden. Above the prompt you see a live plan instead:
 
@@ -30,7 +30,22 @@ While Claude works, its text and tool calls are hidden. Above the prompt you see
 
 Claude gets a small plan tool of its own (it never asks for permission) and an instruction to send its plan first and end with a full summary.
 
-- `/focus-list` turns it on or off. Your choice is remembered.
+**Failures are marked.** When a command or test fails, a red `✗` line under the step says what failed and why (the exit code and the last thing it printed), and the step counts it: `· ✗ 1 failed`. If Claude fixes it and moves on, the step still gets its `✓` but keeps `· 1 failed try`, in the finished list too.
+
+**Click a step to see its actions.** Each step with actions has a `▸`. Click it and the actions open under the step, each with `✓` or `✗` and how long it took. Click again to close. Clicks work in Claude Code's fullscreen mode. A clicked row is never left highlighted.
+
+**History.** `/bottom-line history` opens a panel beside the chat with your past tasks, newest first, one line each: when, how long, the task, and how many steps. Click a task to open it: its steps (with failed tries), the skills and pictures it used, and the first line of its summary. The last 50 tasks are kept.
+
+**Settings.** In Claude Code's plugin settings, bottom-line has four switches, all on by default:
+
+| Switch | Off means |
+| --- | --- |
+| Hide Claude's text while it works | Claude's messages and tool steps show as usual; the list still shows |
+| Skills line | no `✦ Skills` line |
+| Images row | no `▣ Images` row, and no thumbnails are made |
+| Keep the finished list | the list goes away as soon as Claude finishes |
+
+- `/bottom-line` turns the whole mod on or off. Your choice is remembered.
 - `ctrl+o` still shows Claude's full work.
 
 ### Pictures in the images row
@@ -49,7 +64,7 @@ If your terminal can draw kitty-protocol pictures but Claude Code does not know 
 
 Only do this where the terminal really draws pictures; elsewhere you would see stray symbols.
 
-- **macOS:** any picture kind (PNG, JPG, HEIC, GIF, …) becomes a small thumbnail, made by the Mac's own `sips` and kept a day in `~/Library/Caches/focus-list`.
+- **macOS:** any picture kind (PNG, JPG, HEIC, GIF, …) becomes a small thumbnail, made by the Mac's own `sips` and kept a day in `~/Library/Caches/bottom-line`.
 - **Linux and Windows:** PNG pictures (most screenshots) show as they are, up to 1 MB; other kinds are left out of the row.
 
 ## Install
@@ -57,7 +72,7 @@ Only do this where the terminal really draws pictures; elsewhere you would see s
 At the prompt of a Claude Code terminal session:
 
 ```
-/plugin install focus-list --marketplace SamiAbi/claude-mods
+/plugin install bottom-line --marketplace SamiAbi/claude-mods
 ```
 
 Answer `y` to add the marketplace, then pick a scope (the user scope is first).
@@ -65,7 +80,7 @@ Answer `y` to add the marketplace, then pick a scope (the user scope is first).
 From a shell:
 
 ```
-claude plugin install focus-list --marketplace SamiAbi/claude-mods
+claude plugin install bottom-line --marketplace SamiAbi/claude-mods
 ```
 
 In the desktop app, where `/plugin` does not run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `SamiAbi/claude-mods`, then **Add plugin**.

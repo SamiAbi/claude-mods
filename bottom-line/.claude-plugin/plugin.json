@@ -1,0 +1,37 @@
+{
+  "name": "bottom-line",
+  "version": "0.4.0",
+  "description": "While Claude works, hide its text and show a live plan with the skills and images it uses; when it finishes, show only the summary. Keeps a history of past tasks.",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Sami Abishai"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/SamiAbi/claude-mods",
+  "userConfig": {
+    "hideText": {
+      "type": "boolean",
+      "title": "Hide Claude's text while it works",
+      "description": "Off: Claude's messages and tool steps show as usual; the list still shows above the prompt.",
+      "default": true
+    },
+    "skillsLine": {
+      "type": "boolean",
+      "title": "Skills line",
+      "description": "Show the skills Claude uses in the list.",
+      "default": true
+    },
+    "imagesRow": {
+      "type": "boolean",
+      "title": "Images row",
+      "description": "Show thumbnails of the pictures in play in the list.",
+      "default": true
+    },
+    "keepFinished": {
+      "type": "boolean",
+      "title": "Keep the finished list",
+      "description": "Off: the list goes away as soon as Claude finishes, instead of staying until your next prompt.",
+      "default": true
+    }
+  }
+}
