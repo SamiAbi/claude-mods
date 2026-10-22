@@ -340,38 +340,46 @@ async function addHelper($: EngineInterface, fresh: Pick<Helper, 'id' | 'kind' |
     at: await $.clock.now(),
     status: 'running',
   }
-  await update($, helpers, list => [...list, helper].slice(-60))
+  await update($, helpers, list => (list.some(one => one.id === helper.id) ? list : [...list, helper].slice(-60)))
 }
 
-// A helper ended. One of an earlier task (it ran on in the background) updates that
-// task's history, and then leaves.
+// A helper ended. Only its mark changes here: a notice reaches the mod where it has one
+// second, so the history is written a moment later, outside it.
 async function endHelper($: EngineInterface, id: string, status: HelperStatus) {
-  const team = await read($, helpers)
-  const helper = team.find(one => one.id === id)
-  if (!helper || helper.status !== 'running') return
   const at = await $.clock.now()
-  await update($, helpers, list => list.map(one => (one.id === id ? { ...one, status, endAt: at } : one)))
-  const isShown = helper.turn === (await read($, turnNow))
-  if (isShown && (await read($, isWorking))) return
+  await update($, helpers, list =>
+    list.map(one => (one.id === id && one.status === 'running' ? { ...one, status, endAt: at } : one)),
+  )
+  $.clock.after(50, () => {
+    void settleHelpers($)
+  })
+}
 
-  const ended = (await read($, helpers)).filter(one => one.turn === helper.turn)
+// Ended helpers of a task no longer being worked on: written into that task's history,
+// and, for a task no longer shown, let go.
+async function settleHelpers($: EngineInterface) {
+  const shown = await read($, turnNow)
+  const working = await read($, isWorking)
+  const team = await read($, helpers)
+  const turns = [...new Set(team.filter(one => one.status !== 'running' && (one.turn !== shown || !working)).map(one => one.turn))]
+  if (turns.length === 0) return
+
   const before = await $.store.get('history')
   const kept = Array.isArray(before) ? (before as HistoryEntry[]) : []
-  const entry = kept.find(old => old.id === helper.turn)
-  if (entry) {
+  const patched = kept.map(entry => {
+    if (!turns.includes(entry.id)) return entry
+    const ofTask = team.filter(one => one.turn === entry.id)
     const lastTitle = entry.steps[entry.steps.length - 1]?.title
-    const patched: HistoryEntry = {
+    return {
       ...entry,
       steps: entry.steps.map(step => {
-        const team = historyHelpers(ended, step.title, step.title === lastTitle)
-        return team.length > 0 ? { ...step, helpers: team } : step
+        const helpersNow = historyHelpers(ofTask, step.title, step.title === lastTitle)
+        return helpersNow.length > 0 ? { ...step, helpers: helpersNow } : step
       }),
     }
-    await $.store.set('history', kept.map(old => (old.id === entry.id ? patched : old)))
-  }
-  if (!isShown) {
-    await update($, helpers, list => list.filter(one => one.turn !== helper.turn || one.status === 'running'))
-  }
+  })
+  await $.store.set('history', patched)
+  await update($, helpers, list => list.filter(one => one.turn === shown || one.status === 'running'))
 }
 
 // The task id and how it ended, from a background task's notice.
@@ -565,8 +573,9 @@ export const register: Register = (on, options) => {
       await update($, openStep, () => null)
       await update($, openHelper, () => null)
       await update($, turnNow, () => e.turnId)
-      // Helpers of earlier tasks stay only while they still run (their task's history waits on them).
-      await update($, helpers, list => list.filter(helper => helper.status === 'running'))
+      // Helpers of earlier tasks: the ended ones written into their history and let go; the
+      // running ones stay until they end (their task's history waits on them).
+      await settleHelpers($)
       await update($, turnTitle, () => (e.text.split('\n').find(line => line.trim().length > 0) ?? '').trim())
       const typed = await read($, pendingSkills)
       await update($, skills, () => typed)

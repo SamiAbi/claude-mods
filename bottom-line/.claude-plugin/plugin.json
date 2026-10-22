@@ -1,6 +1,6 @@
 {
   "name": "bottom-line",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "While Claude works, hide its text and show a live plan with the skills and images it uses; when it finishes, show only the summary. Keeps a history of past tasks.",
   "types": "./types/index.d.ts",
   "author": {

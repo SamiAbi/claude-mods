@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 const BAND = {
@@ -293,14 +293,17 @@ test('without sips (Linux, Windows) a PNG still shows as it is, sized from its h
 })
 
 // The engine's stand-ins most tests below share; `memory` keeps what the mod stores.
-const standIns = (on: On, at: () => number, memory = new Map<string, unknown>()) => {
+const standIns = (on: On, at: () => number, memory = new Map<string, unknown>(), hasClock = true) => {
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
     return <Text>engine</Text>
   })
-  on('clock.now', () => ({ value: at() }))
-  on('clock.every', () => ({ value: undefined }))
+  if (hasClock) {
+    on('clock.now', () => ({ value: at() }))
+    on('clock.every', () => ({ value: undefined }))
+    on('clock.after', () => ({ value: undefined }))
+  }
   on('store.get', (_, e) => ({ value: memory.get((e as { key: string }).key) }))
   on('store.set', (_, e) => {
     memory.set((e as { key: string }).key, (e as { value: unknown }).value)
@@ -440,9 +443,9 @@ test('helpers: a subagent stands under its step with what it does now; opens on 
 })
 
 test('background commands: a ▶ row under its step, still running after the task, its notice ends it and updates the history', async ($, on) => {
-  let at = 1_000
   const memory = new Map<string, unknown>()
-  standIns(on, () => at, memory)
+  standIns(on, () => 0, memory, false)
+  const clock = mock.clock(on, { now: 1_000 })
   on('tool.call', (_, e) =>
     (e as { tool: string }).tool === 'Bash' ? { result: { stdout: '', stderr: '', interrupted: false, backgroundTaskId: 'bg1' } } : { result: {} },
   )
@@ -451,7 +454,7 @@ test('background commands: a ▶ row under its step, still running after the tas
   await $.turn.start({ text: 'serve it', turnId: 't1' })
   await $.tool.call({ tool: PLAN, steps: [{ title: 'Start the server', status: 'in_progress' }] } as never)
   await $.tool.call({ tool: 'Bash', command: 'npm run dev', description: 'Start the dev server', run_in_background: true, tool_use_id: 'b1' } as never)
-  at += 60_000
+  await clock.advance(60_000)
   await $.turn.complete({ answer: 'Server up.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
 
   const done = await $.ui.mount({ ...BAND, requestId: 'g1' })
@@ -462,14 +465,33 @@ test('background commands: a ▶ row under its step, still running after the tas
   expect(kept()[0]?.status).toBe('running')
 
   // Its notice arrives: it ends, and the task's history says so.
-  at += 30_000
+  await clock.advance(30_000)
   await $.session.append({
     message: { type: 'user', role: 'user', content: [{ type: 'text', text: '<task-notification><task-id>bg1</task-id><status>completed</status></task-notification>' }] },
     door: 'delivery',
     origin: { kind: 'task-notification' },
     uuid: 'n1',
   } as never)
+  // The history is written a moment after the notice, outside its one-second hook.
+  await clock.advance(100)
   expect(kept()[0]?.status).toBe('done')
   const after = await $.ui.mount({ ...BAND, requestId: 'g2' })
   expect((await after.findAll({ type: 'Button' })).some(b => b.text.includes('still running'))).toBe(false)
+})
+
+test('a helper heard twice (its spawn and its start) stands once', async ($, on) => {
+  standIns(on, () => 1_000)
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ model: 'm', agentId: 'a1' }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'look', turnId: 't1' })
+  await $.tool.call({ tool: PLAN, steps: [{ title: 'Look around', status: 'in_progress' }] } as never)
+  await Promise.all([
+    $.agent.spawn({ prompt: 'Look', description: 'Look around', subagentType: 'Explore' } as never),
+    $.agent.spawn({ prompt: 'Look', description: 'Look around', subagentType: 'Explore' } as never),
+  ])
+
+  const band = await $.ui.mount({ ...BAND, requestId: 'd1' })
+  expect((await band.findAll({ type: 'Button' })).filter(b => b.text.includes('Explore'))).toHaveLength(1)
 })
