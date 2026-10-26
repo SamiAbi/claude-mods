@@ -33,6 +33,7 @@ const images = atom({ plugin: 'bottom-line', key: 'images' } as const, [])
 const pendingImages = atom({ plugin: 'bottom-line', key: 'pendingImages' } as const, [])
 const turnTexts = atom({ plugin: 'bottom-line', key: 'turnTexts' } as const, [])
 const turnTools = atom({ plugin: 'bottom-line', key: 'turnTools' } as const, [])
+const tailTexts = atom({ plugin: 'bottom-line', key: 'tailTexts' } as const, [])
 const summaries = atom({ plugin: 'bottom-line', key: 'summaries' } as const, [])
 const hiddenTexts = atom({ plugin: 'bottom-line', key: 'hiddenTexts' } as const, [])
 const hiddenTools = atom({ plugin: 'bottom-line', key: 'hiddenTools' } as const, [])
@@ -50,6 +51,10 @@ const IMAGE_FILE = /\.(png|jpe?g|gif|webp|heic|tiff?|bmp)$/i
 
 // Tools that keep the plan, not do the work: never an action of their own.
 const PLAN_KEEPING = ['TodoWrite', 'TaskUpdate', 'TaskCreate', 'TaskList', 'TaskGet', PLAN_TOOL]
+
+// Tools that hand the person something to open (a page's link, a file): their rows show
+// once the turn ends, so a link is never lost with the work around it.
+const DELIVERING = ['Artifact', 'SendUserFile']
 
 // Every base64 picture in a row's blocks, a tool result's own blocks included.
 type FoundImage = { data: string; toolUseId?: string }
@@ -150,8 +155,8 @@ const planText = (isTextHidden: boolean) =>
       : 'While you work, the person follows your plan, live, above the prompt.',
     `- For every prompt, even a question or a one-step task, your very first action is to call ${PLAN_TOOL} with every step, in plain words, the first one in_progress (a question is two steps at least: finding the answer, then writing it). Call it again each time a step finishes or the next one starts, always with the whole list and exactly one step in_progress until all are done. Change the plan when you learn more.`,
     isTextHidden
-      ? '- Your final message is the only text the person reads. Make it a complete, short summary: what you did, what you found, and anything they must do or decide.'
-      : '- End with a complete, short summary: what you did, what you found, and anything they must do or decide.',
+      ? '- Your final message (everything you write after your last tool call, plan updates aside) is the only text the person reads. Make it a complete, short summary: what you did, what you found, and anything they must do or decide. Put every link, artifact URL and file path they need in it, even if you gave it earlier.'
+      : '- End with a complete, short summary: what you did, what you found, and anything they must do or decide. Put every link, artifact URL and file path they need in it.',
   ].join('\n')
 
 const PLAN_SPEC = {
@@ -238,6 +243,8 @@ const failureReason = (text: string | undefined) => {
 
 const capped = <T,>(list: T[]) => list.slice(-KEEP)
 const trimmed = (text: string) => text.trim()
+// Text as compared: the screen may draw a block with its spacing changed.
+const plain = (text: string) => text.replace(/\s+/g, ' ').trim()
 const isStatus = (value: unknown): value is StepStatus =>
   value === 'pending' || value === 'in_progress' || value === 'completed'
 
@@ -257,12 +264,13 @@ const setPlan = async ($: EngineInterface, next: Step[]) => {
   await update($, steps, () => next)
 }
 
+// A block of a final message is never hidden, nor any part of one.
 const isHidden = async ($: EngineInterface, text: string) => {
-  const key = trimmed(text)
-  if ((await read($, summaries)).includes(key)) return false
+  const key = plain(text)
+  if (key.length > 0 && (await read($, summaries)).some(summary => plain(summary).includes(key))) return false
   if (await read($, isWorking)) return true
 
-  return (await read($, hiddenTexts)).includes(key)
+  return (await read($, hiddenTexts)).some(hidden => plain(hidden) === key)
 }
 
 // The task just finished, kept for the history panel (newest first, fifty kept).
@@ -445,8 +453,8 @@ export const register: Register = (on, options) => {
     await update($, isOn, () => stored !== false)
     await $.command.register({
       name: NAME,
-      description: 'The bottom line: no argument turns it on or off; "history" opens your past tasks; "settings" its switches',
-      argumentHint: '[history | settings]',
+      description: 'The bottom line: no argument turns it on or off; "text" shows or hides Claude’s text while it works; "history" opens your past tasks; "settings" its switches',
+      argumentHint: '[text | history | settings]',
     })
     await $.tool.register(PLAN_SPEC)
     if (await read($, isWorking)) startTicking($)
@@ -460,6 +468,21 @@ export const register: Register = (on, options) => {
       await $.ui.open({ id: HISTORY_PANE, title: 'History' })
 
       return { text: 'History opened beside the chat.' }
+    }
+    if (asked === 'text') {
+      const row = (await $.config.list()).find(one => one.key === `${NAME}.hideText`)
+      if (!row) {
+        return {
+          text: `Set it in ~/.claude/settings.json: "pluginConfigs" → "${NAME}@inline" → "options" → "hideText": ${isTextHidden ? 'false' : 'true'}.`,
+        }
+      }
+      await $.config.set({ key: row.key, value: !isTextHidden })
+
+      return {
+        text: isTextHidden
+          ? 'Claude’s text now shows while it works. The plan stays above the prompt.'
+          : 'Claude’s text is hidden again while it works. You see the plan, then the final message.',
+      }
     }
     if (asked === 'settings') {
       await $.ui.open({ id: SETTINGS_PANE, title: 'Bottom line settings' })
@@ -584,6 +607,7 @@ export const register: Register = (on, options) => {
       await update($, images, () => given)
       await update($, pendingImages, () => [])
       await update($, turnTexts, () => [])
+      await update($, tailTexts, () => [])
       await update($, turnTools, () => [])
       await update($, turnSince, () => at)
       await update($, stepSince, () => at)
@@ -632,6 +656,20 @@ export const register: Register = (on, options) => {
     )
     if (texts.length > 0) await update($, turnTexts, list => capped([...list, ...texts]))
 
+    // The final message is all Claude writes after its last real tool call: a plan
+    // update between its parts does not end it.
+    let tail = await read($, tailTexts)
+    for (const block of content) {
+      if (!block || typeof block !== 'object' || !('type' in block)) continue
+      if (block.type === 'text' && 'text' in block) {
+        const text = trimmed(String(block.text))
+        if (text.length > 0) tail = [...tail, text]
+      } else if (block.type === 'tool_use' && !PLAN_KEEPING.includes('name' in block ? String(block.name) : '')) {
+        tail = []
+      }
+    }
+    await update($, tailTexts, () => tail)
+
     return stored
   }).catch(($, e, next) => next(e))
 
@@ -658,7 +696,7 @@ export const register: Register = (on, options) => {
     if (!(await read($, isWorking))) return next(e)
 
     const input = e as unknown as Record<string, unknown>
-    await update($, turnTools, list => capped([...list, e.tool_use_id]))
+    if (!DELIVERING.includes(e.tool)) await update($, turnTools, list => capped([...list, e.tool_use_id]))
     toolNames.set(
       e.tool_use_id,
       e.tool === 'Read' && IMAGE_FILE.test(String(input.file_path ?? ''))
@@ -765,11 +803,14 @@ export const register: Register = (on, options) => {
       stopTicking()
       const answer = trimmed(e.answer)
       const texts = await read($, turnTexts)
-      const kept = texts.filter(text => text.length > 0 && answer.includes(text))
+      // Trusted only where it ends with the answer the engine reports.
+      const seen = await read($, tailTexts)
+      const tail = answer && plain(seen.join(' ')).includes(plain(answer)) ? seen : []
+      const kept = texts.filter(text => text.length > 0 && (plain(answer).includes(plain(text)) || tail.includes(text)))
       const gone = texts.filter(text => !kept.includes(text))
       const tools = await read($, turnTools)
 
-      await update($, summaries, list => capped([...list, ...kept, ...(answer ? [answer] : [])]))
+      await update($, summaries, list => capped([...list, ...kept, ...tail, ...(answer ? [answer] : [])]))
       await update($, hiddenTexts, list => capped([...list, ...gone]))
       await update($, hiddenTools, list => capped([...list, ...tools]))
 
@@ -781,7 +822,7 @@ export const register: Register = (on, options) => {
           list.map(step => (step.status === 'in_progress' ? { ...step, status: 'completed' as const } : step)),
         )
       }
-      await keepInHistory($, e.turnId, e.isAborted, answer)
+      await keepInHistory($, e.turnId, e.isAborted, tail.length > 0 ? tail.join('\n\n') : answer)
       await update($, clock, () => at)
       await update($, finish, () => ({ at, isAborted: e.isAborted }))
       await update($, isWorking, () => false)

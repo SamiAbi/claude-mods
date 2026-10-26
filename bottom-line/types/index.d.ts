@@ -68,6 +68,7 @@ declare module 'claude-code' {
       pendingImages: Thumb[]
       helpers: Helper[]
       turnTexts: string[]
+      tailTexts: string[]
       turnTools: string[]
       summaries: string[]
       hiddenTexts: string[]

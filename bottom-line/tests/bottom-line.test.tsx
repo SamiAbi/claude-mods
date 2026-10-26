@@ -495,3 +495,74 @@ test('a helper heard twice (its spawn and its start) stands once', async ($, on)
   const band = await $.ui.mount({ ...BAND, requestId: 'd1' })
   expect((await band.findAll({ type: 'Button' })).filter(b => b.text.includes('Explore'))).toHaveLength(1)
 })
+
+test('the final message shows whole: a plan update inside it does not hide its first part; a link tool’s row shows after', async ($, on) => {
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>engine</Text>
+  })
+  on('clock.now', () => ({ value: 1_000 }))
+  on('clock.every', () => ({ value: undefined }))
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'bottom-line' } }))
+  on('tool.register', () => ({ value: { tool: PLAN } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('tool.call', () => ({ result: {} }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+
+  const said = (uuid: string, content: unknown[]) =>
+    $.session.append({
+      message: { type: 'assistant', role: 'assistant', content },
+      door: 'response',
+      origin: { kind: 'model', model: 'm' },
+      uuid,
+    } as never)
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'make a page', turnId: 't1' })
+  await said('a1', [{ type: 'text', text: 'Publishing it now.' }, { type: 'tool_use', id: 'x1', name: 'Artifact', input: {} }])
+  await $.tool.call({ tool: 'Artifact', tool_use_id: 'x1' } as never)
+  await said('a2', [{ type: 'text', text: 'Here is your page:\nhttps://claude.ai/artifact/abc' }, { type: 'tool_use', id: 'p1', name: PLAN, input: {} }])
+  await $.tool.call({ tool: PLAN, tool_use_id: 'p1', steps: [{ title: 'Make it', status: 'completed' }] } as never)
+  await said('a3', [{ type: 'text', text: 'All done.' }])
+  await $.turn.complete({ answer: 'All done.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+
+  const shows = async (requestId: string, text: string) => {
+    const row = await $.ui.mount(reply(requestId, text))
+    const seen = (await row.find({ type: 'Text', text: /engine/ })) !== undefined
+    await row.unmount()
+    return seen
+  }
+  expect(await shows('r1', 'Publishing it now.')).toBe(false)
+  // Drawn with its spacing changed, the first part of the final message still shows.
+  expect(await shows('r2', 'Here is your page:  https://claude.ai/artifact/abc')).toBe(true)
+  expect(await shows('r3', 'All done.')).toBe(true)
+
+  const tool = await $.ui.mount({
+    plugin: 'bottom-line',
+    surface: 'terminal',
+    component: 'ToolResult',
+    requestId: 'x1',
+    props: { tool_use_id: 'x1', tool: 'Artifact', isExpanded: false },
+  } as never)
+  expect(await tool.find({ type: 'Text', text: /engine/ })).toBeDefined()
+})
+
+test('/bottom-line text flips the hide-text switch', async ($, on) => {
+  const set: unknown[] = []
+  on('store.get', () => ({ value: undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('command.register', () => ({ value: { command: 'bottom-line' } }))
+  on('tool.register', () => ({ value: { tool: PLAN } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('config.list', () => ({ value: [{ key: 'bottom-line.hideText', label: "Hide Claude's text while it works", value: true }] }) as never)
+  on('config.set', (_, e) => (set.push({ key: e.key, value: e.value }), { value: e.value }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const said = await $.command.run({ command: 'bottom-line', args: 'text' } as never)
+  expect(set).toEqual([{ key: 'bottom-line.hideText', value: false }])
+  expect(String((said as { text?: string }).text)).toMatch(/now shows/)
+})

@@ -26,9 +26,9 @@ While Claude works, its text and tool calls are hidden. Above the prompt you see
 - The next step is marked **→ Next:**.
 - Once Claude uses a skill, a skills line appears at the bottom: every skill used in the task, each once, the newest lit and twinkling. Skills you start with `/name` count too; skills used by Claude's helpers (subagents) do not.
 - Once a picture is in play, an images row shows thumbnails: pictures you paste or drag into your prompt, pictures Claude opens, and screenshots it takes. The newest that fit are shown, the rest counted.
-- When Claude finishes, only its summary stays in the conversation, and the finished list stays above the prompt until your next prompt, ending with `✦ Used`, the skills it used, and its pictures.
+- When Claude finishes, its whole final message stays in the conversation — everything it wrote after its last real action, even when a plan update falls in the middle of it. Links Claude hands you (an artifact's page, a file it sends) stay on screen too. The rest of its text is hidden, and the finished list stays above the prompt until your next prompt, ending with `✦ Used`, the skills it used, and its pictures.
 
-Claude gets a small plan tool of its own (it never asks for permission) and an instruction to send its plan first and end with a full summary.
+Claude gets a small plan tool of its own (it never asks for permission) and an instruction to send its plan first and end with a full summary that repeats every link and file path you need.
 
 **Failures are marked.** When a command or test fails, a red `✗` line under the step says what failed and why (the exit code and the last thing it printed), and the step counts it: `· ✗ 1 failed`. If Claude fixes it and moves on, the step still gets its `✓` but keeps `· 1 failed try`, in the finished list too.
 
@@ -59,6 +59,7 @@ Claude gets a small plan tool of its own (it never asks for permission) and an i
 | Keep the finished list | the list goes away as soon as Claude finishes |
 
 - `/bottom-line` turns the whole mod on or off. Your choice is remembered.
+- `/bottom-line text` shows or hides Claude's text while it works: the same switch as *Hide Claude's text while it works*, without opening the settings.
 - `ctrl+o` still shows Claude's full work.
 
 ### Pictures in the images row
