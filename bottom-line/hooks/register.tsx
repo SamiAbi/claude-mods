@@ -349,6 +349,7 @@ async function addHelper($: EngineInterface, fresh: Pick<Helper, 'id' | 'kind' |
     status: 'running',
   }
   await update($, helpers, list => (list.some(one => one.id === helper.id) ? list : [...list, helper].slice(-60)))
+  await syncTicking($)
 }
 
 // A helper ended. Only its mark changes here: a notice reaches the mod where it has one
@@ -358,6 +359,7 @@ async function endHelper($: EngineInterface, id: string, status: HelperStatus) {
   await update($, helpers, list =>
     list.map(one => (one.id === id && one.status === 'running' ? { ...one, status, endAt: at } : one)),
   )
+  await syncTicking($)
   $.clock.after(50, () => {
     void settleHelpers($)
   })
@@ -425,7 +427,9 @@ async function bringOldSaves($: EngineInterface) {
 // What each of Claude's tool calls is called, for naming the pictures it brings back.
 const toolNames = new Map<string, string>()
 
-// The animation's heartbeat: runs only while Claude works.
+// The animation's heartbeat: runs while Claude works, and on after its turn ends for as
+// long as a helper of the task shown still runs (a subagent in the background), so that
+// helper's spinner and time keep moving instead of looking stopped.
 let ticker: Timer | undefined
 
 function startTicking($: EngineInterface) {
@@ -438,6 +442,23 @@ function startTicking($: EngineInterface) {
 function stopTicking() {
   ticker?.cancel()
   ticker = undefined
+}
+
+async function isMoving($: EngineInterface) {
+  if (!(await read($, isOn))) return false
+  if (await read($, isWorking)) return true
+  const shown = await read($, turnNow)
+
+  return (await read($, helpers)).some(helper => helper.status === 'running' && helper.turn === shown)
+}
+
+// Ticks when something on screen moves; still otherwise.
+async function syncTicking($: EngineInterface) {
+  if (await isMoving($)) {
+    if (!ticker) startTicking($)
+  } else if (ticker) {
+    stopTicking()
+  }
 }
 
 export const register: Register = (on, options) => {
@@ -457,7 +478,7 @@ export const register: Register = (on, options) => {
       argumentHint: '[text | history | settings]',
     })
     await $.tool.register(PLAN_SPEC)
-    if (await read($, isWorking)) startTicking($)
+    await syncTicking($)
 
     return next(e)
   })
@@ -499,6 +520,7 @@ export const register: Register = (on, options) => {
     const turnOn = !(await read($, isOn))
     await update($, isOn, () => turnOn)
     await $.store.set('isOn', turnOn)
+    await syncTicking($)
 
     return {
       text: turnOn
@@ -800,7 +822,6 @@ export const register: Register = (on, options) => {
       return next(e)
     }
     if (await read($, isWorking)) {
-      stopTicking()
       const answer = trimmed(e.answer)
       const texts = await read($, turnTexts)
       // Trusted only where it ends with the answer the engine reports.
@@ -826,6 +847,7 @@ export const register: Register = (on, options) => {
       await update($, clock, () => at)
       await update($, finish, () => ({ at, isAborted: e.isAborted }))
       await update($, isWorking, () => false)
+      await syncTicking($)
     }
 
     return next(e)

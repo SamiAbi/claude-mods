@@ -566,3 +566,32 @@ test('/bottom-line text flips the hide-text switch', async ($, on) => {
   expect(set).toEqual([{ key: 'bottom-line.hideText', value: false }])
   expect(String((said as { text?: string }).text)).toMatch(/now shows/)
 })
+
+test('a subagent still running after the task ends keeps moving: its spinner and time go on, then stop once it ends', async ($, on) => {
+  standIns(on, () => 0, new Map(), false)
+  const clock = mock.clock(on, { now: 1_000 })
+  on('tool.call', () => ({ result: {} }))
+  on('agent.spawn', () => ({ model: 'm', agentId: 'a1' }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'look', turnId: 't1' })
+  await $.tool.call({ tool: PLAN, steps: [{ title: 'Look around', status: 'in_progress' }] } as never)
+  await $.agent.spawn({ prompt: 'Look', description: 'Look around', subagentType: 'Explore' } as never)
+  await clock.advance(2_000)
+  // The main turn ends while the helper runs on in the background.
+  await $.turn.complete({ answer: 'Waiting on the helper.', durationMs: 5, isAborted: false, turnId: 't1', reason: 'answer' })
+  await clock.advance(5_000)
+
+  const band = await $.ui.mount({ ...BAND, requestId: 'm1' })
+  const helperRow = async () => (await band.findAll({ type: 'Button' })).map(b => b.text).find(t => t.includes('Explore')) ?? ''
+  expect(await helperRow()).toContain('still running · 7s')
+  const firstSpin = await helperRow()
+  await clock.advance(120)
+  expect(await helperRow()).not.toBe(firstSpin)
+
+  // It ends: it folds into a count on its finished step, as an ended helper does.
+  await $.turn.complete({ answer: 'Found.', durationMs: 5, isAborted: false, turnId: 'x1', agentId: 'a1', reason: 'answer' } as never)
+  await clock.advance(5_000)
+  expect(await helperRow()).toBe('')
+  expect((await band.findAll({ type: 'Button' })).some(b => b.text.includes('Look around') && b.text.includes('1 helper'))).toBe(true)
+})
